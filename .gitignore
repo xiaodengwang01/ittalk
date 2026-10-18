@@ -1,28 +1,15 @@
-# Track the project sources and the explicitly named mock workbook only.
+# Only source code, project instructions and the mock example are public.
 /*
 !/.gitignore
 !/.gitattributes
 !/README.md
 !/AGENTS.md
-!/Tailki_模拟.xlsx
 !/一键上传.command
 !/首次授权并上传.command
 !/scripts/
 !/docs/
-!/待导入/
-!/备份/
-!/发送预览/
-!/运行记录/
 
-/待导入/*
-!/待导入/.gitkeep
-/备份/*
-!/备份/.gitkeep
-/发送预览/*
-!/发送预览/.gitkeep
-/运行记录/*
-!/运行记录/.gitkeep
-
+/KOL搜集与邮件回复/
 **/.DS_Store
 **/node_modules/
 **/__pycache__/
@@ -37,10 +24,8 @@
 **/*.sqlite*
 **/*.db
 **/*.log
-
-# Real spreadsheets and message templates remain local, even below scripts/docs.
 **/*.xlsx
-!/Tailki_模拟.xlsx
+!/scripts/examples/Tailki_模拟.xlsx
 **/*.xls
 **/*.xlsm
 **/*.csv

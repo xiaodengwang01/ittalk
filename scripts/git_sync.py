@@ -13,8 +13,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parent.parent
 REMOTE = "https://github.com/xiaodengwang01/ittalk.git"
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-LOCAL_DIRS = {"待导入", "备份", "发送预览", "运行记录"}
-PUBLIC_ROOT_FILES = {".gitignore", ".gitattributes", "README.md", "AGENTS.md", "Tailki_模拟.xlsx", "一键上传.command", "首次授权并上传.command"}
+MOCK_WORKBOOK = Path("scripts/examples/Tailki_模拟.xlsx")
+PUBLIC_ROOT_FILES = {".gitignore", ".gitattributes", "README.md", "AGENTS.md", "一键上传.command", "首次授权并上传.command"}
 
 
 def git(*args, check=True, timeout=30):
@@ -29,7 +29,7 @@ def git(*args, check=True, timeout=30):
 
 
 def check_mock_workbook():
-    file = ROOT / "Tailki_模拟.xlsx"
+    file = ROOT / MOCK_WORKBOOK
     # The sample is optional; deleting it must not block source-only uploads.
     if not file.exists():
         return
@@ -73,7 +73,7 @@ def approved_path(name):
     path = Path(name)
     if name in PUBLIC_ROOT_FILES:
         return True
-    if len(path.parts) == 2 and path.parts[0] in LOCAL_DIRS and path.parts[1] == ".gitkeep":
+    if path == MOCK_WORKBOOK:
         return True
     return path.parts[0] in {"scripts", "docs"} and path.suffix in {".py", ".mjs", ".js", ".sh", ".command", ".md", ".txt"}
 
@@ -89,7 +89,7 @@ def main():
         raise RuntimeError("当前分支不是 main，已停止。")
     check_mock_workbook()
     tracked = git("ls-files", "--cached", "--others", "--exclude-standard", "-z").stdout.split("\0")
-    rejected = sorted({name for name in tracked if name and not approved_path(name)})
+    rejected = sorted({name for name in tracked if name and (ROOT / name).exists() and not approved_path(name)})
     if rejected:
         raise RuntimeError("存在未批准上传的文件：" + "、".join(rejected))
     if args.check_only:

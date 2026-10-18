@@ -12,7 +12,7 @@ const { Workbook, SpreadsheetFile } = await import(pathToFileURL(moduleResolver.
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tailki-preview-'));
-const destination = path.resolve(process.argv[2] || path.join(projectRoot, 'Tailki_模拟.xlsx'));
+const destination = path.resolve(process.argv[2] || path.join(projectRoot, 'scripts/examples/Tailki_模拟.xlsx'));
 try {
   await fs.access(destination);
   throw new Error('目标文件已存在，停止以避免覆盖。');
