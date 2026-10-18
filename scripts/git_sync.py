@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REMOTE = "https://github.com/xiaodengwang01/ittalk.git"
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 LOCAL_DIRS = {"待导入", "备份", "发送预览", "运行记录"}
-PUBLIC_ROOT_FILES = {".gitignore", ".gitattributes", "README.md", "AGENTS.md", "Tailki_模拟.xlsx", "一键上传.command"}
+PUBLIC_ROOT_FILES = {".gitignore", ".gitattributes", "README.md", "AGENTS.md", "Tailki_模拟.xlsx", "一键上传.command", "首次授权并上传.command"}
 
 
 def git(*args, check=True, timeout=30):
@@ -30,6 +30,9 @@ def git(*args, check=True, timeout=30):
 
 def check_mock_workbook():
     file = ROOT / "Tailki_模拟.xlsx"
+    # The sample is optional; deleting it must not block source-only uploads.
+    if not file.exists():
+        return
     with ZipFile(file) as archive:
         strings = []
         if "xl/sharedStrings.xml" in archive.namelist():
