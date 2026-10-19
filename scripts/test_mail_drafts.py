@@ -294,6 +294,24 @@ class DraftTests(unittest.TestCase):
         keychain.assert_not_called()
         self.assertEqual(self.state.config(), {})
 
+    def test_private_preview_contains_complete_escaped_text_and_source_is_unchanged(self):
+        self.prepare()
+        item = self.state.items("SIM-BATCH")[0]
+        self.state.update(item, body=item["body"] + "\n<script>untrusted</script>")
+        before = self.book.read_bytes()
+        output = Path(m.render_preview(self.state, "SIM-BATCH"))
+        try:
+            html = output.read_text()
+            self.assertIn("sim-001@example.invalid", html)
+            self.assertIn("Best,\nSara\nTailki", html)
+            self.assertIn("&lt;script&gt;untrusted&lt;/script&gt;", html)
+            self.assertNotIn("<script>", html)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.book.read_bytes(), before)
+        finally:
+            output.unlink()
+            output.parent.rmdir()
+
 
 class FakeIMAP:
     def __init__(self, host, port, *, ssl_context, timeout):
@@ -344,6 +362,15 @@ class FakeIMAP:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_login_failure_explains_configuration_without_echoing_server_data(self):
+        class Rejected(FakeIMAP):
+            def login(self, account, secret):
+                raise m.imaplib.IMAP4.error("do-not-echo-simulated-private-value")
+        with self.assertRaises(m.DraftError) as caught:
+            m.Mailbox("sara@example.invalid", "simulated-private-value", factory=Rejected)
+        self.assertIn("IMAP 登录", str(caught.exception))
+        self.assertNotIn("simulated-private-value", str(caught.exception))
+
     def test_special_use_and_localized_folder_names(self):
         folders = m.parse_folders([b'(\\Drafts) "/" "My Drafts"', b'(\\Sent) "/" "Sent Items"'])
         self.assertEqual(m.choose_folder(folders, "drafts")["raw"], b"My Drafts")

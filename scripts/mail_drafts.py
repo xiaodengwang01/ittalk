@@ -13,7 +13,7 @@ from email.parser import BytesParser
 from email.utils import format_datetime, getaddresses
 import fcntl
 import hashlib
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 import imaplib
 import json
@@ -404,7 +404,11 @@ class Mailbox:
         try:
             self.client = (factory or imaplib.IMAP4_SSL)(
                 "imap.qiye.aliyun.com", 993, ssl_context=ssl.create_default_context(), timeout=30)
-            self.client.login(account, secret)
+            try:
+                self.client.login(account, secret)
+            except imaplib.IMAP4.error as error:
+                raise DraftError("邮箱服务器拒绝 IMAP 登录。请核实完整邮箱地址和三方客户端安全密码，"
+                                 "并由管理员允许第三方客户端登录及 IMAP 服务。本次操作已停止；未发送邮件。") from error
             code, entries = self.client.list()
             if code != "OK":
                 raise DraftError("无法列出邮箱文件夹，未写入草稿。")
@@ -588,6 +592,58 @@ def report(state, batch_id, *, halted=False, show=False):
             "halted": halted, "items": [{k: item[k] for k in fields if k in item} for item in items]}
 
 
+def render_preview(state, batch_id):
+    """Private temporary review copy, with all source content HTML-escaped."""
+    items = state.items(batch_id)
+    categories = Counter(item["category"] for item in items)
+    cards, navigation = [], []
+    for index, item in enumerate(items, 1):
+        current = item.get("remote")
+        recipient = ", ".join(current["to"]) if current else item["recipient"]
+        subject = current["subject"] if current else item["subject"]
+        body = current["body"] if current else item["body"]
+        label = "邮箱读回稿" if current else "本机初稿"
+        name = item["name"] or item["creator_id"]
+        navigation.append('<a href="#mail-' + str(index) + '">' + str(index) + ". " + escape(name) + "</a>")
+        detail = ""
+        if current:
+            for key, title in (("cc", "抄送"), ("bcc", "密送")):
+                if current.get(key):
+                    detail += "<p>" + title + "：" + escape(", ".join(current[key])) + "</p>"
+            if current.get("attachments"):
+                detail += "<p>附件：" + str(current["attachments"]) + " 个，请在邮箱中核对。</p>"
+        reason = '<p class="reason">' + escape(item["reason"]) + "</p>" if item.get("reason") else ""
+        cards.append(
+            '<article id="mail-' + str(index) + '"><div class="eyebrow">'
+            + escape(item["category"]) + " · " + label + "</div><h2>" + str(index) + ". " + escape(name)
+            + '</h2><p class="recipient">收件人：' + escape(recipient) + "</p>" + detail
+            + '<p class="subject">主题：' + escape(subject) + "</p>" + reason
+            + "<pre>" + escape(body) + "</pre></article>"
+        )
+    counts = "，".join(category + " " + str(count) + " 封" for category, count in categories.items())
+    page = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tailki 首联邮件完整预览</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#20242b;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:16px;line-height:1.65}
+main{max-width:1000px;margin:auto;padding:40px 24px}h1{font-size:30px;line-height:1.3;margin:0 0 14px}h2{font-size:22px;margin:4px 0 14px}
+header{margin-bottom:28px}.subtle{color:#606975;font-size:14px}.summary{font-size:18px}nav{display:flex;flex-wrap:wrap;gap:8px 16px;margin:24px 0}
+nav a{color:#31557d;text-decoration:none;font-size:14px}article{background:white;border:1px solid #dfe3e8;border-radius:10px;padding:28px 32px;margin:22px 0;scroll-margin-top:18px}
+.eyebrow{font-size:13px;color:#687685}.recipient{overflow-wrap:anywhere}.subject{font-weight:600}.reason{color:#8a4b16;background:#fff6e9;padding:10px 14px}
+pre{font-family:inherit;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.75;margin:24px 0 0}
+@media(max-width:640px){main{padding:24px 14px}article{padding:22px 18px}h1{font-size:25px}}
+@media print{body{background:white}nav{display:none}main{max-width:none;padding:0}article{border:0;border-top:1px solid #ddd;border-radius:0;break-inside:avoid;padding:20px 0}}
+</style><main><header><h1>Tailki 首联邮件完整预览</h1>'''
+    page += '<p class="summary">已填好 ' + str(len(items)) + " 封 · " + escape(counts) + "</p>"
+    page += "<p>内容待人工确认，尚未通过本流程发送。请逐封查看收件人、主题和全文，并在对话中说明修改意见。</p>"
+    page += '<p class="subtle">批次：' + escape(batch_id) + " · 预览生成时间：" + escape(now()) + "</p></header>"
+    page += "<nav>" + "".join(navigation) + "</nav>" + "".join(cards) + "</main></html>"
+    directory = Path(tempfile.mkdtemp(prefix="tailki-mail-review-"))
+    output = directory / "首联邮件完整预览.html"
+    output.write_text(page, encoding="utf-8")
+    os.chmod(output, 0o600)
+    return str(output)
+
+
 def connect(config):
     if not config.get("account"):
         raise DraftError("尚未配置邮箱；本地文本已保留，请先运行 setup --gui。")
@@ -656,6 +712,7 @@ def main(argv=None):
         if command == "verify":
             item_parser.add_argument("--show", action="store_true")
             item_parser.add_argument("--local", action="store_true", help="只查看本地记录，不连接邮箱")
+            item_parser.add_argument("--preview", action="store_true", help="生成仅本机可读的临时完整预览")
     args = parser.parse_args(argv)
     state, mailbox = None, None
     try:
@@ -674,6 +731,8 @@ def main(argv=None):
             result = {"audit": audit, "save": save, "verify": verify}[args.command](state, args.batch, mailbox)
             if args.command == "verify" and args.show:
                 result = report(state, args.batch, show=True)
+        if args.command == "verify" and args.preview:
+            result["preview_path"] = render_preview(state, args.batch)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1 if result.get("halted") else 0
     except (DraftError, CredentialError) as error:
