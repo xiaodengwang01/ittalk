@@ -203,7 +203,10 @@ class RoundTripTests(unittest.TestCase):
         first, second = creator(), creator(2)
         first.update({'首次联系日期': '2026-10-19', '最近收信时间': '2026-10-19T00:00:00',
                       '最近发信时间': '2026-10-19T10:00:00', '自定义字段': 'Extra field',
-                      '沟通摘要': '模拟主要条件，待下一步确认。'})
+                      '沟通摘要': '模拟主要条件，待下一步确认。',
+                      '草稿状态':'未发送草稿','草稿收件人':'alpha@example.invalid','草稿主题':'Sim reply draft',
+                      '当前回复草稿':'SIM-UNSENT-WORKSPACE-BODY\n\nKeep draft paragraphs.',
+                      '草稿来源':'模拟对话确认未发送'})
         cls.body = '=Literal mail text, never an Excel formula\n\nKeep the original second paragraph.\n' + '模拟长正文。' * 300
         messages = [incoming(邮件正文=cls.body, 邮件时间='2026-10-19T11:20:00', 邮件摘要='模拟摘要一',
                              自定义字段='Mail extra', _notes={'邮件正文': '模拟原文备注'}),
@@ -242,6 +245,22 @@ class RoundTripTests(unittest.TestCase):
             self.assertFalse(any(n.startswith('xl/media/') for n in z.namelist()))
             self.assertFalse(any(n.startswith('xl/drawings/drawing') and n.endswith('.xml') for n in z.namelist()))
         self.assertFalse(set(self.actual['sheets'][1]['headers']) & app.REMOVED_MAIL_FIELDS)
+
+    def test_current_draft_survives_refresh_without_becoming_mail_history(self):
+        snapshot=copy.deepcopy(self.actual)
+        creators,messages=app.prepare(snapshot)
+        app.refresh(creators,messages,today='2026-10-19')
+        self.assertEqual(creators[0]['当前回复草稿'],'SIM-UNSENT-WORKSPACE-BODY\n\nKeep draft paragraphs.')
+        self.assertEqual(creators[0]['草稿状态'],'未发送草稿')
+        self.assertEqual(len(messages),3)
+        for output in (app.mail_text.overview(creators,messages),app.mail_text.context(creators,messages,creators[0]['达人ID'])):
+            self.assertNotIn('SIM-UNSENT-WORKSPACE-BODY',json.dumps(output,ensure_ascii=False))
+        with ZipFile(self.book) as z:
+            root=E.fromstring(z.read('xl/worksheets/sheet1.xml'))
+            draft_col=app.MASTER.index('当前回复草稿')+1
+            column=next(c for c in root.findall('s:cols/s:col',app.NS) if int(c.get('min'))==draft_col)
+            self.assertEqual(column.get('hidden'),'1')
+            self.assertEqual(column.get('outlineLevel'),'2')
 
     def test_details_and_technical_columns_are_nested_collapsed(self):
         with ZipFile(self.book) as z: root = E.fromstring(z.read('xl/worksheets/sheet2.xml'))

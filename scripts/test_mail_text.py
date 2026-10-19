@@ -337,6 +337,27 @@ class SummaryTests(unittest.TestCase):
         mail.set_mail_summary(self.messages[0], "模拟邮件摘要")
         mail.set_creator_summary(self.creators[0], self.messages, "模拟沟通摘要")
 
+    def test_current_main_draft_edits_and_removal_invalidate_summary(self):
+        row=self.creators[0]
+        row.update({'草稿状态':'未发送草稿','草稿收件人':'one@example.invalid','草稿主题':'Sim reply','当前回复草稿':'SIM-UNSENT-PRIVATE-TEXT','草稿来源':'模拟对话'})
+        self.set_summaries()
+        for field in ('草稿状态','草稿收件人','草稿主题','当前回复草稿','草稿来源'):
+            with self.subTest(field=field):
+                old=row[field];row[field]=old+' changed'
+                mail.refresh_summary_states(self.creators,self.messages)
+                self.assertEqual(row['沟通摘要状态'],'待更新')
+                row[field]=old;self.set_summaries()
+        for field in ('草稿状态','草稿收件人','草稿主题','当前回复草稿','草稿来源'):row[field]=''
+        mail.refresh_summary_states(self.creators,self.messages)
+        self.assertEqual(row['沟通摘要状态'],'待更新')
+
+    def test_main_draft_body_never_enters_overview_or_mail_context(self):
+        self.creators[0].update({'草稿状态':'未发送草稿','当前回复草稿':'SIM-UNSENT-PRIVATE-TEXT'})
+        self.set_summaries()
+        for output in (mail.overview(self.creators,self.messages),mail.context(self.creators,self.messages,'SIM-001')):
+            self.assertNotIn('SIM-UNSENT-PRIVATE-TEXT',json.dumps(output,ensure_ascii=False))
+        self.assertEqual(len(self.messages),1)
+
     def test_body_hash_does_not_strip(self):
         self.assertNotEqual(mail.body_hash("Text"), mail.body_hash("Text "))
         self.assertNotEqual(mail.body_hash("Text"), mail.body_hash("\nText"))

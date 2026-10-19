@@ -37,7 +37,8 @@ MASTER = ['达人ID','达人昵称','沟通摘要','沟通摘要状态','联系�
  '联系方式完整度(1-5)','综合评分','是否低粉高播放','是否带货类似产品','首次报价(USD)',
  '对方回复风格判断','应对策略选择','我们的报价或合作方式','我们的报价(USD)2','备注',
  '是否寄样','收件人','地址信息','电话','物流单号','到货情况','推荐脚本方向','是否发布','发布日期',
- '视频链接','是否授权素材','Bio外链','UTM链接','优惠码','沟通摘要依据指纹']
+ '视频链接','是否授权素材','Bio外链','UTM链接','优惠码',
+ '草稿状态','草稿收件人','草稿主题','当前回复草稿','草稿来源','沟通摘要依据指纹']
 MAIL = ['邮件记录ID','达人ID','达人昵称','方向','邮件时间','主题','邮件摘要','处理状态','正文完整性','摘要状态',
  '邮件正文','发件人','收件人','原邮件定位','邮件原始时间','核实说明','记录来源',
  '邮箱消息ID','会话ID','邮箱账户','摘要依据指纹','邮件用途','实际发送结果','发送确认批次',
@@ -367,7 +368,8 @@ def prepare(state):
     state['sheets'][0]['widths']={'达人ID':17,'达人昵称':26,'沟通摘要':58,'沟通摘要状态':15,'首联内容分类':17,'分类核实状态':15,
       '联系状态':13,'下一步动作':16,'计划跟进日期':17,'Email':34,'账号链接':42,'平台':13,'宠物类型':13,
       '联系页链接':36,'来源链接':42,'内容类型':36,'来源':24,'联系方式备注':46,
-      '对方回复风格判断':46,'资料核实说明':46,'备注':64}
+      '对方回复风格判断':46,'资料核实说明':46,'备注':64,
+      '草稿状态':20,'草稿收件人':34,'草稿主题':52,'当前回复草稿':90,'草稿来源':52}
     state['sheets'][1]['widths']={'达人昵称':24,'方向':10,'邮件时间':21,'发件人':32,'收件人':32,
       '主题':40,'邮件摘要':62,'邮件正文':90,'处理状态':19,'正文完整性':15,'摘要状态':13,'实际发送结果':19,'原邮件定位':40,
       '邮件原始时间':45,'核实说明':65,'记录来源':42}
@@ -383,6 +385,10 @@ def validate(state):
     keys=[(c.get('平台'),rules.canonical_account_url(c.get('平台'),c.get('账号链接'))) for c in creators if c.get('账号链接')]
     if len(set(keys))!=len(keys): raise ValueError('账号仍有重复')
     for c in creators:
+        if c.get('当前回复草稿') and c.get('草稿状态')!='未发送草稿':
+            raise ValueError('主表草稿需要明确标为未发送；实际发出后归档到邮件记录并清除当前草稿')
+        if c.get('当前回复草稿') and not rules.is_valid_email(c.get('草稿收件人')):
+            raise ValueError('主表草稿需要保存其对应的收件邮箱')
         if c.get('Email') and not rules.is_valid_email(c['Email']): raise ValueError('Email列存在无效邮箱')
         if c.get('下一步动作') not in rules.NEXT_ACTIONS: raise ValueError('下一步动作不在约定范围')
         for field in ('粉丝数','近10条中位播放','近10条最高播放'):
@@ -413,7 +419,7 @@ def patch_groups(path,state):
             part=f'xl/worksheets/sheet{index}.xml'; root=E.fromstring(z.read(part))
             E.register_namespace('',M); E.register_namespace('r',NS['r'])
             start=tab['headers'].index('是否寄样')+1 if index==1 else tab['headers'].index('邮件正文')+1
-            tech=tab['headers'].index('邮箱消息ID')+1 if index==2 else len(tab['headers'])+1
+            tech=tab['headers'].index('邮箱消息ID')+1 if index==2 else tab['headers'].index('草稿状态')+1
             cols=root.find('s:cols',NS)
             replacements=[]
             for c in list(cols):
@@ -421,7 +427,7 @@ def patch_groups(path,state):
                     new=copy.deepcopy(c); new.set('min',str(n));new.set('max',str(n))
                     if n>=start: new.set('hidden','1');new.set('outlineLevel','2' if n>=tech else '1')
                     elif n==start-1: new.set('collapsed','1')
-                    if index==2 and n==tech-1: new.set('collapsed','1')
+                    if n==tech-1: new.set('collapsed','1')
                     replacements.append(new)
             cols[:]=replacements
             props=root.find('s:sheetPr',NS)
@@ -429,7 +435,7 @@ def patch_groups(path,state):
             outline=props.find('s:outlinePr',NS)
             if outline is None: outline=E.SubElement(props,'{'+M+'}outlinePr')
             outline.set('summaryRight','0')
-            sf=root.find('s:sheetFormatPr',NS);sf.set('outlineLevelCol','2' if index==2 else '1')
+            sf=root.find('s:sheetFormatPr',NS);sf.set('outlineLevelCol','2')
             edits[part]=E.tostring(root,encoding='utf-8',xml_declaration=True)
         temp=Path(str(path)+'.grouped')
         with ZipFile(temp,'w',ZIP_DEFLATED) as out:

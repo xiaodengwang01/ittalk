@@ -251,7 +251,14 @@ def creator_fingerprint(creator, messages):
     identifier = _text(creator.get("达人ID"))
     mail = sorted(((_text(m.get("邮件记录ID")), message_fingerprint(m)) for m in messages
                    if _text(m.get("达人ID")) == identifier and is_archive_message(m)))
-    return _hash({"达人": {f: _stable_value(f, creator.get(f)) for f in _CREATOR_SUMMARY_FIELDS}, "邮件": mail})
+    profile = {f: _stable_value(f, creator.get(f)) for f in _CREATOR_SUMMARY_FIELDS}
+    # Current unsent text belongs to the main-sheet workspace, not mail history.
+    # Bind summaries that mention it while retaining existing hashes for rows
+    # with no draft. An edit or removal must mark that summary stale.
+    draft_fields = ("草稿状态", "草稿收件人", "草稿主题", "当前回复草稿", "草稿来源")
+    if any(_text(creator.get(f)) for f in draft_fields):
+        profile["当前草稿"] = {f: _stable_value(f, creator.get(f)) for f in draft_fields}
+    return _hash({"达人": profile, "邮件": mail})
 
 
 def set_creator_summary(creator, messages, summary):

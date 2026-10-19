@@ -37,6 +37,7 @@ const choices = {
   '正文完整性':['完整','部分','待核实','缺失'],
   '摘要状态':['有效','待更新'],
   '沟通摘要状态':['有效','待更新'],
+  '草稿状态':['未发送草稿'],
   '实际发送结果':['成功'],
   '邮件用途':['收信','回复'],
   '宠物类型':['Dog','Cat','Dog+Cat','Cat+Dog','Other'],
@@ -96,7 +97,8 @@ for (const tab of spec.sheets) {
     if (numbers.has(h)) body.setNumberFormat(h==='综合评分'?'0.00':'#,##0');
     if (choices[h]) body.dataValidation={rule:{type:'list',values:choices[h]}};
     if (['资料核实说明','核实说明','沟通摘要','邮件摘要','邮件正文','主题',
-         '内容类型','来源','联系方式备注','对方回复风格判断','备注'].includes(h)) {
+         '内容类型','来源','联系方式备注','对方回复风格判断','备注',
+         '草稿主题','当前回复草稿','草稿来源'].includes(h)) {
       range.format.wrapText = true;
       range.format.verticalAlignment = 'top';
     }
