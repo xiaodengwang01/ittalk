@@ -17,27 +17,26 @@ if (input.endsWith('.xlsx')) {
   process.exit(0);
 }
 const spec = JSON.parse(await fs.readFile(input,'utf8'));
-const removedMain = new Set(['沟通摘要状态','下一步动作','分类核实状态','联系页链接','来源链接','来源',
-  '首次联系日期','历史跟进日期','资料核实说明','联系方式备注','首次报价(USD)']);
 for (const tab of spec.sheets) {
-  if (tab.name==='达人开发主表' && tab.headers.some(h=>removedMain.has(h))) throw Error('主表含已删除的旧列，请先迁移内容。');
   if (tab.headers.includes('历史截图')) throw Error('纯文本工作簿不能包含历史截图列。');
   if (tab.rows.some(row => (row._images || []).length)) throw Error('纯文本工作簿不能写入图片，请先转录正文。');
 }
 const wb = Workbook.create();
 const purple = '#705CBC';
 const col = n => { let s=''; for(n++;n;n=Math.floor((n-1)/26)) s=String.fromCharCode(65+(n-1)%26)+s; return s; };
-const dates = new Set(['最近联系','首联发送时间','计划跟进日期','邮件时间','最近收信时间','最近发信时间','最近抓取时间','确认时间','草稿生成时间','发布日期']);
-const numbers = new Set(['粉丝数','近10条中位播放','近10条最高播放','内容能力(1-5)','宠物人群匹配度(1-5)','播放能力(1-5)','联系方式完整度(1-5)','综合评分','对方报价(原币)','我们的报价(USD)2']);
+const dates = new Set(['首次联系日期','历史跟进日期','计划跟进日期','邮件时间','最近收信时间','最近发信时间','最近抓取时间','确认时间','草稿生成时间','发布日期']);
+const numbers = new Set(['粉丝数','近10条中位播放','近10条最高播放','内容能力(1-5)','宠物人群匹配度(1-5)','播放能力(1-5)','联系方式完整度(1-5)','综合评分','首次报价(USD)','我们的报价(USD)2']);
 const choices = {
   '首联内容分类':['宠物剧情类','宠物用品类','非宠物垂类','待核实'],
+  '分类核实状态':['初判','已确认','待核实'],
   '平台':['TikTok','Instagram','YouTube','Other'],
-  '联系状态':['初次建联已发送','对方第一次回复','我方第一次回复','对方第二次回复','我方第二次回复','长期有效沟通'],
-  '报价币种':['USD','EUR','GBP','CAD','AUD','CNY','其他','待核实（$）'],
+  '联系状态':['待联系','已联系','跟进中','已回复','拒绝','合作中','已完成','勿联系','待核实'],
+  '下一步动作':['补资料','核实分类','首联草稿','回复草稿','跟进草稿','等待对方','暂停联系'],
   '方向':['收信','发信','待核实'],
   '处理状态':['待处理','待回复','已归档','待人工归属','历史文本待核实','已发送'],
   '正文完整性':['完整','部分','待核实','缺失'],
   '摘要状态':['有效','待更新'],
+  '沟通摘要状态':['有效','待更新'],
   '草稿状态':['未发送草稿'],
   '实际发送结果':['成功'],
   '邮件用途':['收信','回复'],
@@ -48,7 +47,7 @@ const choices = {
   '是否发布':['否','待发布','是'],'是否授权素材':['否','待确认','是'],
 };
 const widths = {
-  '沟通摘要':58, '邮件摘要':62, '邮件正文':90,
+  '沟通摘要':58, '沟通摘要状态':16, '邮件摘要':62, '邮件正文':90,
   '邮件记录ID':18, '达人ID':17, '达人昵称':24, '方向':10,
   '邮件时间':21, '主题':52, '处理状态':22, '正文完整性':16, '摘要状态':15,
   '发件人':32, '收件人':32, '原邮件定位':40, '邮件原始时间':24,
@@ -91,23 +90,24 @@ for (const tab of spec.sheets) {
     const range=sheet.getRange(`${col(i)}1:${col(i)}${lastRow}`);
     range.format.columnWidth = tab.widths?.[h] || widths[h] || 20;
     const body=sheet.getRange(`${col(i)}2:${col(i)}${Math.max(lastRow,500)}`);
-    if (dates.has(h)) body.setNumberFormat(h==='计划跟进日期'||h==='发布日期'?'yyyy-mm-dd':'yyyy-mm-dd hh:mm');
+    if (dates.has(h)) body.setNumberFormat(h==='计划跟进日期'||h==='首次联系日期'||h==='历史跟进日期'||h==='发布日期'?'yyyy-mm-dd':'yyyy-mm-dd hh:mm');
     if (dates.has(h)) for(let r=0;r<tab.rows.length;r++) {
       if (/^\d{4}-\d{2}-\d{2}$/.test(String(tab.rows[r][h]||''))) sheet.getRange(`${col(i)}${r+2}`).setNumberFormat('yyyy-mm-dd');
     }
-    if (numbers.has(h)) body.setNumberFormat(h==='综合评分'?'0.00':h==='对方报价(原币)'||h==='我们的报价(USD)2'?'#,##0.00':'#,##0');
+    if (numbers.has(h)) body.setNumberFormat(h==='综合评分'?'0.00':'#,##0');
     if (choices[h]) body.dataValidation={rule:{type:'list',values:choices[h]}};
-    if (['核实说明','沟通摘要','邮件摘要','邮件正文','主题','报价币种','报价口径',
-         '内容类型','对方回复风格判断','备注',
+    if (['资料核实说明','核实说明','沟通摘要','邮件摘要','邮件正文','主题',
+         '内容类型','来源','联系方式备注','对方回复风格判断','备注',
          '草稿主题','当前回复草稿','草稿来源'].includes(h)) {
       range.format.wrapText = true;
       range.format.verticalAlignment = 'top';
     }
-    if (h==='计划跟进日期'||h==='草稿状态') body.format.fill='#FFF6DE';
-    if (h==='报价币种'||h==='首联内容分类') {
+    if (h==='下一步动作'||h==='计划跟进日期'||h==='分类核实状态') body.format.fill='#FFF6DE';
+    if (h==='分类核实状态'||h==='下一步动作') {
       body.conditionalFormats.add('containsText',{text:'待核实',format:{fill:'#FFF1D6',font:{color:'#8A5700'}}});
+      if(h==='下一步动作') body.conditionalFormats.add('containsText',{text:'暂停',format:{fill:'#FCE8E6',font:{color:'#9D2823'}}});
     }
-    if (h==='摘要状态'||h==='沟通摘要') {
+    if (h==='摘要状态'||h==='沟通摘要状态') {
       body.conditionalFormats.add('containsText',{text:'待更新',format:{fill:'#FFF1D6',font:{color:'#8A5700'}}});
     }
   }
@@ -134,7 +134,7 @@ const errors=await wb.inspect({kind:'match',searchTerm:'#REF!|#DIV/0!|#VALUE!|#N
 if (!errors.ndjson.includes('matched 0')) console.error(errors.ndjson);
 if(previewDir) {
   await fs.mkdir(previewDir,{recursive:true});
-  for(const [name,range,file] of [['达人开发主表','A1:I7','main.png'],['达人开发主表','J1:L9','main-quotes.png'],['邮件记录','A1:J6','mail.png']]) {
+  for(const [name,range,file] of [['达人开发主表','A1:G7','main.png'],['达人开发主表','H1:P8','main-data.png'],['邮件记录','A1:J6','mail.png']]) {
     const blob=await wb.render({sheetName:name,range,scale:1,format:'png'});
     await fs.writeFile(path.join(previewDir,file),new Uint8Array(await blob.arrayBuffer()));
   }

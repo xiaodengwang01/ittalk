@@ -16,10 +16,8 @@ from urllib.parse import parse_qs, urlsplit
 
 try:
     from . import workflow_rules as rules
-    from . import main_schema
 except ImportError:
     import workflow_rules as rules
-    import main_schema
 
 
 ARCHIVE_FIELDS = (
@@ -31,10 +29,9 @@ ARCHIVE_FIELDS = (
 _MAIL_SUMMARY_FIELDS = tuple(f for f in ARCHIVE_FIELDS
                              if f not in {"邮件摘要", "摘要依据指纹", "摘要状态"})
 _CREATOR_SUMMARY_FIELDS = (
-    "达人ID", "达人昵称", "联系状态", "计划跟进日期", "最近联系", "最近收信时间", "最近发信时间",
-    "对方报价(原币)", "报价币种", "报价口径",
+    "达人ID", "达人昵称", "联系状态", "下一步动作", "计划跟进日期", "最近收信时间", "最近发信时间",
+    "首次联系日期", "资料核实说明",
 )
-_STALE_SUMMARY_PREFIX = "【摘要待更新】"
 _INCOMPLETE = {"部分", "待核实", "缺失"}
 _DRAFT_STATES = {"待确认草稿", "已确认待发送", "草稿", "已作废", "发送失败"}
 _INITIAL_PURPOSES = {"首联", "初次建联", "首次联系", "初次联系"}
@@ -230,8 +227,7 @@ def initial_contact_metadata(record):
     if record.get("实际发送结果") != "成功":
         return {}
     return {"达人ID": _text(record.get("达人ID")), "最近发信时间": record.get("邮件时间", ""),
-            "最近联系": record.get("邮件时间", ""), "首联发送时间": record.get("邮件时间", ""),
-            "首联发送结果": "成功"}
+            "首次联系日期": record.get("邮件时间", ""), "首联发送结果": "成功"}
 
 
 def message_fingerprint(record):
@@ -266,17 +262,10 @@ def creator_fingerprint(creator, messages):
 
 
 def set_creator_summary(creator, messages, summary):
-    creator["沟通摘要"] = _summary_without_stale_marker(summary)
+    creator["沟通摘要"] = _raw(summary)
     creator["沟通摘要依据指纹"] = creator_fingerprint(creator, messages)
-    creator.pop("沟通摘要状态", None)
+    creator["沟通摘要状态"] = "有效" if _text(summary) else "待更新"
     return creator
-
-
-def _summary_without_stale_marker(summary):
-    summary = _raw(summary)
-    while summary.startswith(_STALE_SUMMARY_PREFIX):
-        summary = summary[len(_STALE_SUMMARY_PREFIX):].lstrip()
-    return summary
 
 
 def refresh_summary_states(creators, messages):
@@ -290,11 +279,11 @@ def refresh_summary_states(creators, messages):
         elif record.get("摘要状态") != "待更新":
             record["摘要状态"] = "有效"
     for creator in creators:
-        prior_state = creator.pop("沟通摘要状态", None)
-        summary = _raw(creator.get("沟通摘要"))
-        if (prior_state == "待更新" or not _text(summary) or not creator.get("沟通摘要依据指纹")
+        if (not _text(creator.get("沟通摘要")) or not creator.get("沟通摘要依据指纹")
                 or creator["沟通摘要依据指纹"] != creator_fingerprint(creator, messages)):
-            creator["沟通摘要"] = _STALE_SUMMARY_PREFIX + _summary_without_stale_marker(summary)
+            creator["沟通摘要状态"] = "待更新"
+        elif creator.get("沟通摘要状态") != "待更新":
+            creator["沟通摘要状态"] = "有效"
     return {"达人": creators, "邮件": messages}
 
 
@@ -338,7 +327,7 @@ def _stable_value(field, value):
     """Survive XLSX empty cells and ISO-space/T date serialization changes."""
     if value is None:
         return ""
-    if field in {"邮件时间", "确认时间", "计划跟进日期", "最近联系", "最近收信时间", "最近发信时间", "首联发送时间"}:
+    if field in {"邮件时间", "确认时间", "计划跟进日期", "最近收信时间", "最近发信时间", "首次联系日期"}:
         if ((isinstance(value, date) and not isinstance(value, datetime))
                 or (isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()))):
             return str(value).strip()
@@ -415,6 +404,13 @@ def _apply_contact_state(creators, record):
     if current and (old is None or current > old):
         creator[latest] = record["邮件时间"]
     if record["方向"] == "收信":
+        blocked = (creator.get("下一步动作") == "暂停联系"
+                   or creator.get("联系状态") in {"拒绝", "已拒绝", "不合作", "勿联系", "已完成"})
+        if blocked:
+            creator["下一步动作"] = "暂停联系"
+        else:
+            creator["联系状态"] = "已回复"
+            creator["下一步动作"] = "回复草稿"
         creator["计划跟进日期"] = ""
         if not _text(record.get("处理状态")):
             record["处理状态"] = "待回复"
@@ -455,7 +451,6 @@ def import_message(creators, messages, incoming):
     record["邮件用途"] = "收信" if record["方向"] == "收信" else "回复"
     _apply_contact_state(creators, record)
     messages.append(record)
-    main_schema.refresh_progress(creators, messages)
     refresh_summary_states(creators, messages)
     return {"已导入": True, "记录": record, "需人工归属": not bool(record["达人ID"]), "原因": "", "补全待处理": False}
 
@@ -500,7 +495,6 @@ def fill_message(creators, messages, record_id, incoming):
     existing["正文完整性"] = merged["正文完整性"]
     existing.pop("正文或草稿", None)
     _apply_contact_state(creators, existing)
-    main_schema.refresh_progress(creators, messages)
     refresh_summary_states(creators, messages)
     return {"已补全": True, "存在冲突": False, "记录": existing}
 
@@ -515,7 +509,7 @@ def _mail_index(record):
 
 def overview(creators, messages):
     refresh_summary_states(creators, messages)
-    fields = ("达人ID", "达人昵称", "沟通摘要", "联系状态", "计划跟进日期", "草稿状态", "最近联系",
+    fields = ("达人ID", "达人昵称", "沟通摘要", "沟通摘要状态", "联系状态", "下一步动作", "计划跟进日期",
               "最近收信时间", "最近发信时间")
     active = [m for m in messages if is_archive_message(m)]
     return {"达人进展": [{field: c.get(field, "") for field in fields} for c in creators],
@@ -564,7 +558,7 @@ def context(creators, messages, creator_id, budget=24000, cursor=0):
     end = start + len(page)
     known_ids = {id(m) for m in known}
     return {"达人ID": _text(creator_id), "达人昵称": creator.get("达人昵称") or creator.get("昵称", ""),
-            "沟通摘要": creator.get("沟通摘要", ""),
+            "沟通摘要": creator.get("沟通摘要", ""), "沟通摘要状态": creator.get("沟通摘要状态", "待更新"),
             "全部邮件数量": len(ordered), "已知时间邮件数量": len(known), "时间不明邮件数量": len(unknown),
             "本页范围": {"起始": start + 1 if page else 0, "结束": end}, "本页字符数": used,
             "字符预算": budget, "单封超过预算": oversize,

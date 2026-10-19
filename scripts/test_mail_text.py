@@ -13,7 +13,7 @@ except ImportError:
 def creator(identifier="SIM-001", address="one@example.invalid"):
     return {"达人ID": identifier, "达人昵称": "模拟达人" + identifier, "平台": "YouTube",
             "账号链接": "https://youtube.com/@" + identifier.lower(), "Email": address,
-            "联系状态": ""}
+            "联系状态": "待联系", "下一步动作": "首联草稿"}
 
 
 def received(**changes):
@@ -149,7 +149,7 @@ class ArchivePolicyTests(unittest.TestCase):
     def test_initial_metadata_has_no_body_subject_or_recipient(self):
         row = sent(**{"邮件用途": "首联", "主题": "SIM-SECRET-SUBJECT", "邮件正文": "SIM-SECRET-BODY"})
         result = mail.initial_contact_metadata(row)
-        self.assertEqual(set(result), {"达人ID", "最近发信时间", "最近联系", "首联发送时间", "首联发送结果"})
+        self.assertEqual(set(result), {"达人ID", "最近发信时间", "首次联系日期", "首联发送结果"})
         self.assertNotIn("SIM-SECRET", json.dumps(result))
         self.assertEqual(mail.initial_contact_metadata({**row, "实际发送结果": ""}), {})
 
@@ -170,9 +170,8 @@ class ImportTests(unittest.TestCase):
         self.assertFalse(two["已导入"])
         self.assertEqual(len(self.messages), 1)
         self.assertEqual(self.messages[0]["邮件记录ID"], "MAIL-000001")
-        self.assertEqual(self.creators[0]["联系状态"], "对方第一次回复")
-        self.assertNotIn("下一步动作", self.creators[0])
-        self.assertEqual(self.creators[0]["最近联系"], received()["邮件时间"])
+        self.assertEqual(self.creators[0]["联系状态"], "已回复")
+        self.assertEqual(self.creators[0]["下一步动作"], "回复草稿")
 
     def test_ambiguous_quote_chain_is_not_imported_until_manually_separated(self):
         body = "New reply.\n\nOn Mon, Sim wrote:\nUnmarked old chain or bottom reply."
@@ -199,17 +198,21 @@ class ImportTests(unittest.TestCase):
         self.assertTrue(result["已导入"])
         self.assertEqual(result["记录"]["邮件正文"], "Yes, Europe.\n\nIt is 10.")
 
-    def test_incoming_keeps_legacy_contact_limit_but_uses_allowed_progress(self):
+    def test_new_inbound_preserves_declined_or_paused_contact_status(self):
         for state in ("拒绝", "已拒绝", "不合作", "勿联系", "已完成"):
             creators = [creator()]
             creators[0]["联系状态"] = state
             messages = []
             result = mail.import_message(creators, messages, received())
             self.assertTrue(result["已导入"])
-            self.assertEqual(creators[0]["联系状态"], "对方第一次回复")
-            self.assertTrue(mail.main_schema.contact_blocked(creators[0]))
-            self.assertNotIn("下一步动作", creators[0])
+            self.assertEqual(creators[0]["联系状态"], state)
+            self.assertEqual(creators[0]["下一步动作"], "暂停联系")
             self.assertEqual(creators[0]["最近收信时间"], received()["邮件时间"])
+        creators = [creator()]
+        creators[0]["下一步动作"] = "暂停联系"
+        mail.import_message(creators, [], received())
+        self.assertEqual(creators[0]["联系状态"], "待联系")
+        self.assertEqual(creators[0]["下一步动作"], "暂停联系")
 
     def test_distinct_provider_messages_never_collapse(self):
         mail.import_message(self.creators, self.messages, received())
@@ -271,8 +274,7 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(self.messages[0]["邮件正文"], received()["邮件正文"])
         self.assertEqual(self.messages[0]["正文完整性"], "完整")
         self.assertEqual(self.messages[0]["摘要状态"], "待更新")
-        self.assertTrue(self.creators[0]["沟通摘要"].startswith("【摘要待更新】"))
-        self.assertNotIn("沟通摘要状态", self.creators[0])
+        self.assertEqual(self.creators[0]["沟通摘要状态"], "待更新")
 
     def test_explicit_fill_conflict_retains_complete_text(self):
         mail.import_message(self.creators, self.messages, received())
@@ -343,11 +345,11 @@ class SummaryTests(unittest.TestCase):
             with self.subTest(field=field):
                 old=row[field];row[field]=old+' changed'
                 mail.refresh_summary_states(self.creators,self.messages)
-                self.assertTrue(row['沟通摘要'].startswith('【摘要待更新】'))
+                self.assertEqual(row['沟通摘要状态'],'待更新')
                 row[field]=old;self.set_summaries()
         for field in ('草稿状态','草稿收件人','草稿主题','当前回复草稿','草稿来源'):row[field]=''
         mail.refresh_summary_states(self.creators,self.messages)
-        self.assertTrue(row['沟通摘要'].startswith('【摘要待更新】'))
+        self.assertEqual(row['沟通摘要状态'],'待更新')
 
     def test_main_draft_body_never_enters_overview_or_mail_context(self):
         self.creators[0].update({'草稿状态':'未发送草稿','当前回复草稿':'SIM-UNSENT-PRIVATE-TEXT'})
@@ -385,8 +387,7 @@ class SummaryTests(unittest.TestCase):
                 self.messages[0][field] = value
                 mail.refresh_summary_states(self.creators, self.messages)
                 self.assertEqual(self.messages[0]["摘要状态"], "待更新")
-                self.assertTrue(self.creators[0]["沟通摘要"].startswith("【摘要待更新】"))
-                self.assertNotIn("沟通摘要状态", self.creators[0])
+                self.assertEqual(self.creators[0]["沟通摘要状态"], "待更新")
 
     def test_appended_quote_chain_invalidates_exact_body_hash(self):
         self.set_summaries()
@@ -394,45 +395,19 @@ class SummaryTests(unittest.TestCase):
         self.messages[0]["邮件正文"] += "\n\nOn Mon, Sim wrote:\nOld chain"
         self.assertNotEqual(old, mail.message_fingerprint(self.messages[0]))
 
-    def test_contact_progress_and_recent_dates_invalidate_creator_summary(self):
-        for field, value in (("联系状态", "长期有效沟通"), ("最近联系", "2026-10-20"), ("计划跟进日期", "2026-10-20"),
-                             ("对方报价(原币)",123.45),("报价币种","EUR"),("报价口径","2条套餐")):
+    def test_contact_state_and_next_action_invalidate_creator_summary(self):
+        for field, value in (("联系状态", "已拒绝"), ("下一步动作", "暂停联系"), ("计划跟进日期", "2026-10-20")):
             self.set_summaries()
             self.creators[0][field] = value
             mail.refresh_summary_states(self.creators, self.messages)
-            self.assertTrue(self.creators[0]["沟通摘要"].startswith("【摘要待更新】"))
-            self.assertNotIn("沟通摘要状态", self.creators[0])
+            self.assertEqual(self.creators[0]["沟通摘要状态"], "待更新")
             self.assertEqual(self.messages[0]["摘要状态"], "有效")
-
-    def test_inline_stale_marker_is_idempotent_and_explicit_summary_refresh_clears_it(self):
-        self.set_summaries()
-        self.messages[0]["主题"] = "Changed subject"
-        for _ in range(3):
-            mail.refresh_summary_states(self.creators, self.messages)
-        row = self.creators[0]
-        self.assertEqual(row["沟通摘要"], "【摘要待更新】模拟沟通摘要")
-        mail.set_creator_summary(row, self.messages, row["沟通摘要"])
-        self.assertEqual(row["沟通摘要"], "模拟沟通摘要")
-        mail.refresh_summary_states(self.creators, self.messages)
-        self.assertEqual(row["沟通摘要"], "模拟沟通摘要")
-        self.assertNotIn("沟通摘要状态", row)
-
-    def test_deleted_main_summary_state_is_removed_and_pending_marker_survives(self):
-        self.set_summaries()
-        row = self.creators[0]
-        row["沟通摘要状态"] = "待更新"
-        mail.refresh_summary_states(self.creators, self.messages)
-        self.assertEqual(row["沟通摘要"], "【摘要待更新】模拟沟通摘要")
-        self.assertNotIn("沟通摘要状态", row)
-        mail.refresh_summary_states(self.creators, self.messages)
-        self.assertEqual(row["沟通摘要"], "【摘要待更新】模拟沟通摘要")
 
     def test_new_mail_invalidates_creator_summary(self):
         self.set_summaries()
         self.messages.append(sent())
         mail.refresh_summary_states(self.creators, self.messages)
-        self.assertTrue(self.creators[0]["沟通摘要"].startswith("【摘要待更新】"))
-        self.assertNotIn("沟通摘要状态", self.creators[0])
+        self.assertEqual(self.creators[0]["沟通摘要状态"], "待更新")
 
     def test_summary_update_rebinds_fingerprint_and_overview_reports_stale(self):
         self.set_summaries()
@@ -441,8 +416,7 @@ class SummaryTests(unittest.TestCase):
         self.set_summaries()
         mail.refresh_summary_states(self.creators, self.messages)
         self.assertEqual(self.messages[0]["摘要状态"], "有效")
-        self.assertFalse(self.creators[0]["沟通摘要"].startswith("【摘要待更新】"))
-        self.assertNotIn("沟通摘要状态", self.creators[0])
+        self.assertEqual(self.creators[0]["沟通摘要状态"], "有效")
 
 
 class ReadTests(unittest.TestCase):
