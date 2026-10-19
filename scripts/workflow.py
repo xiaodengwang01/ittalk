@@ -7,6 +7,7 @@ import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import posixpath
@@ -19,6 +20,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 import workflow_rules as rules
 import mail_text
+import main_schema as schema
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BOOK = ROOT/'KOL搜集与邮件回复/达人跟进表.xlsx'
@@ -30,22 +32,24 @@ NS = {'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
       'd':'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing',
       'a':'http://schemas.openxmlformats.org/drawingml/2006/main'}
 M = NS['s']
-MASTER = ['达人ID','达人昵称','沟通摘要','沟通摘要状态','联系状态','下一步动作','计划跟进日期','首联内容分类','分类核实状态',
- 'Email','账号链接','平台','宠物类型','联系页链接','最近收信时间','最近发信时间','来源链接','最近抓取时间',
- '内容类型','粉丝数','近10条中位播放','近10条最高播放','来源','首次联系日期','历史跟进日期','资料核实说明',
- '联系方式备注','Instagram','TikTok DM','内容能力(1-5)','宠物人群匹配度(1-5)','播放能力(1-5)',
- '联系方式完整度(1-5)','综合评分','是否低粉高播放','是否带货类似产品','首次报价(USD)',
+MASTER = ['达人ID','达人昵称','沟通摘要','联系状态','计划跟进日期','草稿状态','最近联系','首联内容分类',
+ 'Email','对方报价(原币)','报价币种','报价口径',
+ '账号链接','平台','宠物类型','最近收信时间','最近发信时间','最近抓取时间',
+ '内容类型','粉丝数','近10条中位播放','近10条最高播放','Instagram','TikTok DM',
+ '内容能力(1-5)','宠物人群匹配度(1-5)','播放能力(1-5)',
+ '联系方式完整度(1-5)','综合评分','是否低粉高播放','是否带货类似产品',
  '对方回复风格判断','应对策略选择','我们的报价或合作方式','我们的报价(USD)2','备注',
  '是否寄样','收件人','地址信息','电话','物流单号','到货情况','推荐脚本方向','是否发布','发布日期',
  '视频链接','是否授权素材','Bio外链','UTM链接','优惠码',
- '草稿状态','草稿收件人','草稿主题','当前回复草稿','草稿来源','沟通摘要依据指纹']
+ '草稿收件人','草稿主题','当前回复草稿','草稿来源','沟通摘要依据指纹']
+REMOVED_MASTER_FIELDS = schema.REMOVED_MASTER_FIELDS | {'首次报价(USD)'}
 MAIL = ['邮件记录ID','达人ID','达人昵称','方向','邮件时间','主题','邮件摘要','处理状态','正文完整性','摘要状态',
  '邮件正文','发件人','收件人','原邮件定位','邮件原始时间','核实说明','记录来源',
  '邮箱消息ID','会话ID','邮箱账户','摘要依据指纹','邮件用途','实际发送结果','发送确认批次',
  '确认时间','确认指纹','回复邮件记录ID']
 REMOVED_MAIL_FIELDS = {'正文或草稿','历史截图','草稿用途','模板及版本','草稿版本','草稿生成时间','草稿指纹','首联邮件记录ID','邮件类型'}
 DATE_FIELDS = {'首次联系日期','历史跟进日期','计划跟进日期','邮件时间','最近收信时间','最近发信时间',
- '最近抓取时间','确认时间','草稿生成时间','发布日期'}
+ '最近联系','首联发送时间','最近抓取时间','确认时间','草稿生成时间','发布日期'}
 ALIASES = {'编号':'达人ID','TikTok账号链接':'账号链接','来源路径':'来源','最近跟进日期':'历史跟进日期'}
 MOVED = {'第一次回复情况截图','第一次回复内容文本','第二次回复情况截图2'}
 
@@ -147,8 +151,7 @@ def append_note(record,key,value):
 
 def issue(record,value):
     append_note(record,'资料核实说明',value)
-    short=text(record.get('资料核实说明'))
-    if value not in short and len(short)<90: record['资料核实说明']=(short+'；'+value).strip('；')
+    # Kept as a temporary migration note, rehomed to 备注 by prepare().
 
 def new_mail_id(messages):
     nums=[int(text(m.get('邮件记录ID')).split('-')[-1]) for m in messages if re.fullmatch(r'MAIL-\d+',text(m.get('邮件记录ID')))]
@@ -349,6 +352,19 @@ def prepare(state):
         if '邮件正文' not in message and '正文或草稿' in message:
             message['邮件正文']=mail_text.strip_quoted_history(message.get('正文或草稿'))
         if message.get('达人ID') in ids: message['达人昵称']=ids[message['达人ID']].get('达人昵称')
+    for creator in creators:
+        if creator.get('首次报价(USD)') not in (None,''):
+            old=creator.get('首次报价(USD)')
+            if creator.get('对方报价(原币)') in (None,''):
+                creator['对方报价(原币)']=old
+                if not creator.get('报价币种'): creator['报价币种']='USD'
+                if not creator.get('报价口径'): creator['报价口径']='原表美元报价；交付口径见原备注'
+            elif creator.get('对方报价(原币)')!=old:
+                append_note(creator,'对方报价(原币)','旧首次报价(USD)：'+str(old)+'；与现有原币报价不同，保留现值待核实。')
+        old_note=creator.setdefault('_notes',{}).pop('首次报价(USD)',None)
+        if old_note: append_note(creator,'对方报价(原币)',old_note)
+        creator.pop('首次报价(USD)',None)
+        schema.migrate_creator(creator,messages)
     for row in creators+messages:
         for field in DATE_FIELDS:
             value=row.get(field)
@@ -361,14 +377,14 @@ def prepare(state):
             row[field]=dt.date().isoformat() if len(value)==10 else dt.isoformat(timespec='seconds')
     for tab,expected in zip(state['sheets'],[MASTER,MAIL]):
         # Preserve extra columns added manually rather than silently dropping them.
-        removed=REMOVED_MAIL_FIELDS if tab['name']=='邮件记录' else set()
+        removed=REMOVED_MAIL_FIELDS if tab['name']=='邮件记录' else REMOVED_MASTER_FIELDS
         extra=[h for h in tab['headers'] if h and h not in expected and h not in removed]
         extra += [h for row in tab['rows'] for h in row if not h.startswith('_') and h not in expected+extra and h not in removed]
         tab['headers']=expected+list(dict.fromkeys(extra))
-    state['sheets'][0]['widths']={'达人ID':17,'达人昵称':26,'沟通摘要':58,'沟通摘要状态':15,'首联内容分类':17,'分类核实状态':15,
-      '联系状态':13,'下一步动作':16,'计划跟进日期':17,'Email':34,'账号链接':42,'平台':13,'宠物类型':13,
-      '联系页链接':36,'来源链接':42,'内容类型':36,'来源':24,'联系方式备注':46,
-      '对方回复风格判断':46,'资料核实说明':46,'备注':64,
+    state['sheets'][0]['widths']={'达人ID':17,'达人昵称':26,'沟通摘要':58,'首联内容分类':17,
+      '联系状态':21,'计划跟进日期':17,'最近联系':20,'Email':34,'账号链接':42,'平台':13,'宠物类型':13,
+      '内容类型':36,'对方回复风格判断':46,'备注':64,
+      '对方报价(原币)':19,'报价币种':18,'报价口径':48,
       '草稿状态':20,'草稿收件人':34,'草稿主题':52,'当前回复草稿':90,'草稿来源':52}
     state['sheets'][1]['widths']={'达人昵称':24,'方向':10,'邮件时间':21,'发件人':32,'收件人':32,
       '主题':40,'邮件摘要':62,'邮件正文':90,'处理状态':19,'正文完整性':15,'摘要状态':13,'实际发送结果':19,'原邮件定位':40,
@@ -390,7 +406,12 @@ def validate(state):
         if c.get('当前回复草稿') and not rules.is_valid_email(c.get('草稿收件人')):
             raise ValueError('主表草稿需要保存其对应的收件邮箱')
         if c.get('Email') and not rules.is_valid_email(c['Email']): raise ValueError('Email列存在无效邮箱')
-        if c.get('下一步动作') not in rules.NEXT_ACTIONS: raise ValueError('下一步动作不在约定范围')
+        if c.get('联系状态') not in (None,'') and c.get('联系状态') not in schema.CONTACT_STAGES:
+            raise ValueError('联系状态不在约定的六个沟通阶段中')
+        if c.get('对方报价(原币)') not in (None,''):
+            if isinstance(c['对方报价(原币)'],bool) or not isinstance(c['对方报价(原币)'],(int,float)) or not math.isfinite(c['对方报价(原币)']) or c['对方报价(原币)']<0:
+                raise ValueError('原币报价必须为非负数字')
+            if not c.get('报价币种') or not c.get('报价口径'): raise ValueError('原币报价需要同时保留币种与口径')
         for field in ('粉丝数','近10条中位播放','近10条最高播放'):
             if c.get(field) is not None and not isinstance(c[field],(int,float)): raise ValueError('粉丝或播放不是数字')
     mail_ids=[m.get('邮件记录ID') for m in messages]
@@ -418,16 +439,20 @@ def patch_groups(path,state):
         for index,tab in enumerate(state['sheets'],1):
             part=f'xl/worksheets/sheet{index}.xml'; root=E.fromstring(z.read(part))
             E.register_namespace('',M); E.register_namespace('r',NS['r'])
-            start=tab['headers'].index('是否寄样')+1 if index==1 else tab['headers'].index('邮件正文')+1
-            tech=tab['headers'].index('邮箱消息ID')+1 if index==2 else tab['headers'].index('草稿状态')+1
+            start=tab['headers'].index('账号链接')+1 if index==1 else tab['headers'].index('邮件正文')+1
+            if index==1:
+                nested=[(tab['headers'].index(a)+1,tab['headers'].index(b)+1) for a,b in
+                  [('内容能力(1-5)','是否带货类似产品'),('是否寄样','优惠码'),('当前回复草稿','沟通摘要依据指纹')]]
+            else:
+                nested=[(tab['headers'].index('邮箱消息ID')+1,len(tab['headers']))]
             cols=root.find('s:cols',NS)
             replacements=[]
             for c in list(cols):
                 for n in range(int(c.get('min')),int(c.get('max'))+1):
                     new=copy.deepcopy(c); new.set('min',str(n));new.set('max',str(n))
-                    if n>=start: new.set('hidden','1');new.set('outlineLevel','2' if n>=tech else '1')
+                    if n>=start: new.set('hidden','1');new.set('outlineLevel','2' if any(a<=n<=b for a,b in nested) else '1')
                     elif n==start-1: new.set('collapsed','1')
-                    if n==tech-1: new.set('collapsed','1')
+                    if any(n==a-1 for a,b in nested): new.set('collapsed','1')
                     replacements.append(new)
             cols[:]=replacements
             props=root.find('s:sheetPr',NS)
@@ -491,40 +516,23 @@ def fill_template(value,creator):
     return value
 
 def refresh(creators,messages,template_path=None,today=None):
-    """Reconcile actions only. Drafts are written and approved in conversation."""
-    day=rules._now(today).date()
-    for c in creators:
-        if c.get('下一步动作')=='暂停联系' or c.get('联系状态') in ('拒绝','已拒绝','不合作','勿联系','已完成'):
-            c['下一步动作']='暂停联系';c['计划跟进日期']=None;continue
-        records=[m for m in messages if m.get('达人ID')==c['达人ID'] and mail_text.is_archive_message(m)]
-        received=[m for m in records if m.get('方向')=='收信']
-        sent=[m for m in records if m.get('方向')=='发信']
+    """Refresh six contact stages and dated plans; never recreate removed columns."""
+    rules._now(today)  # Validate the optional business date; no drafts are made.
+    for creator in creators:
+        schema.migrate_creator(creator,messages)
+        records=[m for m in messages if m.get('达人ID')==creator['达人ID'] and mail_text.is_archive_message(m)]
         for direction,field in [('收信','最近收信时间'),('发信','最近发信时间')]:
             dates=[rules._datetime(m.get('邮件时间')) for m in records if m.get('方向')==direction]
             dates=[d for d in dates if d]
-            previous=rules._datetime(c.get(field))
-            if dates and (not previous or max(dates)>previous): c[field]=max(dates).isoformat(timespec='seconds')
-        if received:
-            c['联系状态']='已回复';c['计划跟进日期']=None
-            replied={m.get('回复邮件记录ID') for m in sent if m.get('回复邮件记录ID')}
-            last_sent=max((rules._datetime(m.get('邮件时间')) for m in sent if rules._datetime(m.get('邮件时间'))),default=None)
-            def answered(message):
-                when=rules._datetime(message.get('邮件时间'))
-                return message.get('邮件记录ID') in replied or bool(when and last_sent and when<last_sent)
-            c['下一步动作']='等待对方' if all(answered(m) for m in received) else '回复草稿'
+            previous=rules._datetime(creator.get(field))
+            if dates and (not previous or max(dates)>previous): creator[field]=max(dates).isoformat(timespec='seconds')
+        if schema.contact_blocked(creator) or any(m.get('方向')=='收信' for m in records):
+            creator['计划跟进日期']=None
             continue
-        if not rules.is_valid_email(c.get('Email')): c['下一步动作']='补资料';continue
-        if c.get('分类核实状态')=='待核实' or c.get('首联内容分类') in (None,'','待核实'):
-            c['下一步动作']='核实分类';continue
-        # Only explicit, observed initial-send metadata qualifies. Hand-entered
-        # legacy contact dates alone never trigger a reminder.
-        first=rules._datetime(c.get('首次联系日期')) if c.get('首联发送结果')=='成功' else None
-        if first:
-            due=rules.add_workdays(first,7)
-            c['计划跟进日期']=None if sent else due.isoformat()
-            c['下一步动作']='等待对方' if sent or day<due else '跟进草稿'
-        elif c.get('联系状态') in ('待联系','未联系'):
-            c['下一步动作']='首联草稿'
+        first=rules._datetime(creator.get('首联发送时间')) if creator.get('首联发送结果')=='成功' else None
+        if first and not any(m.get('方向')=='发信' for m in records) and not creator.get('计划跟进日期'):
+            creator['计划跟进日期']=rules.add_workdays(first,7).isoformat()
+    schema.refresh_progress(creators,messages)
     mail_text.refresh_summary_states(creators,messages)
     return []
 
@@ -574,15 +582,14 @@ def main():
                 if metadata:
                     creator=next((c for c in creators if c['达人ID']==metadata.get('达人ID')),None)
                     if not creator: raise ValueError('首联元信息需要明确的现有达人ID')
-                    if not re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}',text(metadata.get('首次联系日期'))):
+                    if not re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}',text(metadata.get('首联发送时间'))):
                         raise ValueError('首联元信息需要完整的实际发送日期和时间')
-                    if not creator.get('首次联系日期') or creator.get('首联发送结果')!='成功':
-                        creator['首次联系日期']=metadata['首次联系日期']
+                    if not creator.get('首联发送时间') or creator.get('首联发送结果')!='成功':
+                        creator['首联发送时间']=metadata['首联发送时间']
                     sent_at=rules._datetime(metadata['最近发信时间'])
                     old_sent=rules._datetime(creator.get('最近发信时间'))
                     if sent_at and (not old_sent or sent_at>old_sent): creator['最近发信时间']=metadata['最近发信时间']
                     creator['首联发送结果']='成功'
-                    if creator.get('联系状态') in ('待联系','未联系'): creator['联系状态']='已联系'
                 record=imported.get('记录') or {}
                 result.append({k:v for k,v in imported.items() if k not in ('记录','首联元信息')})
                 result[-1]['邮件记录ID']=record.get('邮件记录ID')
