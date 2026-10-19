@@ -95,7 +95,8 @@ for (const tab of spec.sheets) {
     }
     if (numbers.has(h)) body.setNumberFormat(h==='综合评分'?'0.00':'#,##0');
     if (choices[h]) body.dataValidation={rule:{type:'list',values:choices[h]}};
-    if (['资料核实说明','核实说明','沟通摘要','邮件摘要','邮件正文','主题'].includes(h)) {
+    if (['资料核实说明','核实说明','沟通摘要','邮件摘要','邮件正文','主题',
+         '内容类型','来源','联系方式备注','对方回复风格判断','备注'].includes(h)) {
       range.format.wrapText = true;
       range.format.verticalAlignment = 'top';
     }
