@@ -18,6 +18,7 @@ import xml.etree.ElementTree as E
 from zipfile import ZipFile, ZIP_DEFLATED
 
 import workflow_rules as rules
+import mail_text
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BOOK = ROOT/'KOL搜集与邮件回复/达人跟进表.xlsx'
@@ -29,18 +30,19 @@ NS = {'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
       'd':'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing',
       'a':'http://schemas.openxmlformats.org/drawingml/2006/main'}
 M = NS['s']
-MASTER = ['达人ID','达人昵称','首联内容分类','分类核实状态','联系状态','下一步动作','计划跟进日期',
+MASTER = ['达人ID','达人昵称','沟通摘要','沟通摘要状态','联系状态','下一步动作','计划跟进日期','首联内容分类','分类核实状态',
  'Email','账号链接','平台','宠物类型','联系页链接','最近收信时间','最近发信时间','来源链接','最近抓取时间',
  '内容类型','粉丝数','近10条中位播放','近10条最高播放','来源','首次联系日期','历史跟进日期','资料核实说明',
  '联系方式备注','Instagram','TikTok DM','内容能力(1-5)','宠物人群匹配度(1-5)','播放能力(1-5)',
  '联系方式完整度(1-5)','综合评分','是否低粉高播放','是否带货类似产品','首次报价(USD)',
  '对方回复风格判断','应对策略选择','我们的报价或合作方式','我们的报价(USD)2','备注',
  '是否寄样','收件人','地址信息','电话','物流单号','到货情况','推荐脚本方向','是否发布','发布日期',
- '视频链接','是否授权素材','Bio外链','UTM链接','优惠码']
-MAIL = ['邮件记录ID','达人ID','达人昵称','方向','邮件时间','发件人','收件人','主题','正文或草稿',
- '处理状态','实际发送结果','草稿用途','模板及版本','草稿版本','草稿生成时间','原邮件定位',
- '邮件原始时间','核实说明','历史截图','记录来源','邮箱消息ID','会话ID','草稿指纹','发送确认批次',
- '确认时间','确认指纹','首联邮件记录ID','回复邮件记录ID']
+ '视频链接','是否授权素材','Bio外链','UTM链接','优惠码','沟通摘要依据指纹']
+MAIL = ['邮件记录ID','达人ID','达人昵称','方向','邮件时间','主题','邮件摘要','处理状态','正文完整性','摘要状态',
+ '邮件正文','发件人','收件人','原邮件定位','邮件原始时间','核实说明','记录来源',
+ '邮箱消息ID','会话ID','邮箱账户','摘要依据指纹','邮件用途','实际发送结果','发送确认批次',
+ '确认时间','确认指纹','回复邮件记录ID']
+REMOVED_MAIL_FIELDS = {'正文或草稿','历史截图','草稿用途','模板及版本','草稿版本','草稿生成时间','草稿指纹','首联邮件记录ID','邮件类型'}
 DATE_FIELDS = {'首次联系日期','历史跟进日期','计划跟进日期','邮件时间','最近收信时间','最近发信时间',
  '最近抓取时间','确认时间','草稿生成时间','发布日期'}
 ALIASES = {'编号':'达人ID','TikTok账号链接':'账号链接','来源路径':'来源','最近跟进日期':'历史跟进日期'}
@@ -67,7 +69,7 @@ def rels(z,part):
     if name not in z.namelist(): return {}
     return {r.get('Id'):r for r in E.fromstring(z.read(name))}
 
-def read_book(path,workdir):
+def read_book(path,workdir,extract_images=False):
     """Read values, dates, notes and all original PNG screenshots without third-party writers."""
     Path(workdir).mkdir(parents=True,exist_ok=True)
     with ZipFile(path) as z:
@@ -81,7 +83,7 @@ def read_book(path,workdir):
             if fmt in range(14,23) or re.search('[ydh]',code,re.I): date_styles.add(i)
             if fmt in range(14,18) or (re.search('[yd]',code,re.I) and not re.search('[hs]',code,re.I)): date_only_styles.add(i)
         wb=E.fromstring(z.read('xl/workbook.xml')); relationships=rels(z,'xl/workbook.xml')
-        result={'sheets':[]}
+        result={'sheets':[], 'embedded_images':sum(n.startswith('xl/media/') for n in z.namelist())}
         for tab in wb.findall('s:sheets/s:sheet',NS):
             part=resolve_part('xl/workbook.xml',relationships[tab.get('{'+NS['r']+'}id')].get('Target'))
             root=E.fromstring(z.read(part)); rows=[]; by_row={}; header=None
@@ -96,6 +98,9 @@ def read_book(path,workdir):
                         # Excel dates have no time zone. The writer uses UTC construction
                         # to encode the business wall-clock value without a host-zone shift.
                         dt=datetime.fromisoformat(value.replace('Z','+00:00')).replace(tzinfo=None)
+                        # XLSX serial conversion can yield .999 for an exact
+                        # second. The archive stores seconds, so round once.
+                        dt=(dt+timedelta(microseconds=500000)).replace(microsecond=0)
                         value=dt.date().isoformat() if int(c.get('s','0')) in date_only_styles else dt.isoformat(timespec='seconds')
                     elif typ=='b' and value is not None: value=value=='1'
                     elif value not in (None,'') and typ not in ('str','e'):
@@ -118,7 +123,7 @@ def read_book(path,workdir):
                     for note in E.fromstring(z.read(target)).findall('s:commentList/s:comment',NS):
                         address=note.get('ref'); rn=int(re.search(r'\d+',address).group()); cn=col_number(address)
                         if rn in by_row and cn<=len(header): by_row[rn]['_notes'][header[cn-1]]=''.join(note.find('s:text',NS).itertext())
-                if typ.endswith('/drawing'):
+                if typ.endswith('/drawing') and extract_images:
                     drawing=E.fromstring(z.read(target)); drawing_rels=rels(z,target)
                     for i,anchor in enumerate(drawing):
                         origin=anchor.find('d:from',NS); picture=anchor.find('d:pic',NS)
@@ -283,15 +288,66 @@ def migrate(state,evidence,template_path):
                      {'name':'邮件记录','headers':MAIL,'rows':messages}]}
     return state
 
+def convert_text(state,annotations):
+    """One explicit, evidence-backed conversion. No source text is guessed."""
+    if [s['name'] for s in state['sheets']]!=['达人开发主表','邮件记录']:
+        raise ValueError('纯文本迁移需要现有两张工作表')
+    creators,old=[s['rows'] for s in state['sheets']]
+    evidence=annotations.get('messages',{})
+    if state.get('embedded_images') and not any(r.get('_images') for r in old):
+        raise ValueError('未读取图片证据，停止纯文本转换')
+    known_media={p.get('source_media_path') for r in old for p in r.get('_images',[]) if p.get('source_media_path')}
+    if state.get('embedded_images',0)>len(known_media):
+        raise ValueError('存在尚未对应到邮件记录的图片，停止移除')
+    retained=[]
+    for record in old:
+        identifier=record.get('邮件记录ID')
+        note=evidence.get(identifier,{})
+        for field in ('邮件记录ID','达人ID'):
+            if field in note and text(note[field])!=text(record.get(field)):
+                raise ValueError('转录不能改变原记录身份或归属：'+str(identifier))
+        if record.get('_images') and not note.get('邮件正文'):
+            raise ValueError('截图尚无核对转录，停止移除：'+str(identifier))
+        candidate={**record,**{k:v for k,v in note.items() if k in MAIL}}
+        if not mail_text.is_archive_message(candidate):
+            if record.get('_images'):
+                raise ValueError('截图的收发归属或正文范围尚待核实，停止移除：'+str(identifier))
+            continue
+        if note.get('核实说明新增'):
+            candidate['核实说明']=(text(record.get('核实说明'))+'\n'+note['核实说明新增']).strip()
+        normalized=mail_text.canonical_message(candidate)
+        normalized['_notes']={('邮件正文' if k=='正文或草稿' else k):v
+          for k,v in record.get('_notes',{}).items() if k not in REMOVED_MAIL_FIELDS-{'正文或草稿'}}
+        normalized['_images']=[]
+        if record.get('_images') or '截图' in text(normalized.get('记录来源')):
+            normalized['记录来源']='截图转录；'+text(record.get('记录来源'))
+            normalized['处理状态']='历史文本待核实' if normalized.get('达人ID') else '待人工归属'
+        mail_text.set_mail_summary(normalized,note.get('邮件摘要') or normalized.get('邮件摘要',''))
+        retained.append(normalized)
+    state['sheets'][1]['rows']=retained
+    state['sheets'][1]['headers']=list(MAIL)
+    state['embedded_images']=0
+    for creator in creators:
+        extra=annotations.get('removed_header_creator_notes',{}).get(creator.get('达人ID'))
+        if extra:
+            issue(creator,extra if isinstance(extra,str) else '\n'.join(extra))
+    prepare(state)
+    refresh(creators,retained)
+    for creator in creators:
+        note=annotations.get('creators',{}).get(creator.get('达人ID'),{})
+        summary=note.get('沟通摘要') or '尚无已归属的收信或已发送后续回复记录；历史联系情况仍需核实。'
+        mail_text.set_creator_summary(creator,retained,summary)
+    return state
+
 def prepare(state):
     if [s['name'] for s in state['sheets']]!=['达人开发主表','邮件记录']: raise ValueError('需要两张工作表：达人开发主表、邮件记录')
     creators,messages=[s['rows'] for s in state['sheets']]
     rules.ensure_creator_ids(creators)
     ids={c['达人ID']:c for c in creators}
     for message in messages:
+        if '邮件正文' not in message and '正文或草稿' in message:
+            message['邮件正文']=mail_text.strip_quoted_history(message.get('正文或草稿'))
         if message.get('达人ID') in ids: message['达人昵称']=ids[message['达人ID']].get('达人昵称')
-        if message.get('方向')=='发信' and message.get('处理状态')=='已确认待发送' and not rules.confirmation_valid(message):
-            message['处理状态']='待确认草稿'; message['发送确认批次']=None; message['确认时间']=None; message['确认指纹']=None
     for row in creators+messages:
         for field in DATE_FIELDS:
             value=row.get(field)
@@ -304,19 +360,23 @@ def prepare(state):
             row[field]=dt.date().isoformat() if len(value)==10 else dt.isoformat(timespec='seconds')
     for tab,expected in zip(state['sheets'],[MASTER,MAIL]):
         # Preserve extra columns added manually rather than silently dropping them.
-        extra=[h for h in tab['headers'] if h and h not in expected]
-        extra += [h for row in tab['rows'] for h in row if not h.startswith('_') and h not in expected+extra]
+        removed=REMOVED_MAIL_FIELDS if tab['name']=='邮件记录' else set()
+        extra=[h for h in tab['headers'] if h and h not in expected and h not in removed]
+        extra += [h for row in tab['rows'] for h in row if not h.startswith('_') and h not in expected+extra and h not in removed]
         tab['headers']=expected+list(dict.fromkeys(extra))
-    state['sheets'][0]['widths']={'达人ID':17,'达人昵称':26,'首联内容分类':17,'分类核实状态':15,
+    state['sheets'][0]['widths']={'达人ID':17,'达人昵称':26,'沟通摘要':58,'沟通摘要状态':15,'首联内容分类':17,'分类核实状态':15,
       '联系状态':13,'下一步动作':16,'计划跟进日期':17,'Email':34,'账号链接':42,'平台':13,'宠物类型':13,
       '联系页链接':36,'来源链接':42,'内容类型':31,'资料核实说明':46,'备注':38}
     state['sheets'][1]['widths']={'达人昵称':24,'方向':10,'邮件时间':21,'发件人':32,'收件人':32,
-      '主题':52,'正文或草稿':90,'处理状态':22,'实际发送结果':19,'模板及版本':38,'原邮件定位':40,
-      '邮件原始时间':45,'核实说明':65,'历史截图':74,'记录来源':42}
+      '主题':40,'邮件摘要':62,'邮件正文':90,'处理状态':19,'正文完整性':15,'摘要状态':13,'实际发送结果':19,'原邮件定位':40,
+      '邮件原始时间':45,'核实说明':65,'记录来源':42}
+    mail_text.refresh_summary_states(creators,messages)
     return creators,messages
 
 def validate(state):
     creators,messages=prepare(state)
+    if state.get('embedded_images') or any(r.get('_images') for s in state['sheets'] for r in s['rows']):
+        raise ValueError('工作簿含图片；请先完成核对转录并执行convert-text')
     ids=[c['达人ID'] for c in creators]
     if len(set(ids))!=len(ids): raise ValueError('达人ID重复')
     keys=[(c.get('平台'),rules.canonical_account_url(c.get('平台'),c.get('账号链接'))) for c in creators if c.get('账号链接')]
@@ -327,10 +387,18 @@ def validate(state):
         for field in ('粉丝数','近10条中位播放','近10条最高播放'):
             if c.get(field) is not None and not isinstance(c[field],(int,float)): raise ValueError('粉丝或播放不是数字')
     mail_ids=[m.get('邮件记录ID') for m in messages]
-    if None in mail_ids or len(set(mail_ids))!=len(mail_ids): raise ValueError('邮件记录ID缺失或重复')
+    if any(not text(i) for i in mail_ids) or len(set(mail_ids))!=len(mail_ids): raise ValueError('邮件记录ID缺失或重复')
     for m in messages:
+        reason=mail_text.archive_reason(m)
+        if reason: raise ValueError('邮件不在归档范围：'+str(m.get('邮件记录ID'))+'；'+reason)
+        if mail_text.extract_new_body(m.get('邮件正文'))['需核实']:
+            raise ValueError('旧引用与本次正文尚未区分，停止归档：'+str(m.get('邮件记录ID')))
         if m.get('达人ID') and m['达人ID'] not in ids: raise ValueError('邮件关联到不存在的达人ID')
         if not m.get('达人ID') and m.get('处理状态')!='待人工归属': raise ValueError('未关联邮件必须待人工归属')
+    for tab in state['sheets']:
+        for row in tab['rows']:
+            if any(isinstance(row.get(h),str) and len(row[h])>32767 for h in tab['headers']):
+                raise ValueError('单元格超过Excel正文上限32767字符，停止保存以免截断')
     return {'creators':len(creators),'messages':len(messages),
       'screenshots':sum(len(r.get('_images',[])) for r in messages),
       'drafts':sum(m.get('处理状态') in ('待确认草稿','已确认待发送') for m in messages),
@@ -343,14 +411,16 @@ def patch_groups(path,state):
         for index,tab in enumerate(state['sheets'],1):
             part=f'xl/worksheets/sheet{index}.xml'; root=E.fromstring(z.read(part))
             E.register_namespace('',M); E.register_namespace('r',NS['r'])
-            start=tab['headers'].index('是否寄样')+1 if index==1 else tab['headers'].index('邮箱消息ID')+1
+            start=tab['headers'].index('是否寄样')+1 if index==1 else tab['headers'].index('邮件正文')+1
+            tech=tab['headers'].index('邮箱消息ID')+1 if index==2 else len(tab['headers'])+1
             cols=root.find('s:cols',NS)
             replacements=[]
             for c in list(cols):
                 for n in range(int(c.get('min')),int(c.get('max'))+1):
                     new=copy.deepcopy(c); new.set('min',str(n));new.set('max',str(n))
-                    if n>=start: new.set('hidden','1');new.set('outlineLevel','1')
+                    if n>=start: new.set('hidden','1');new.set('outlineLevel','2' if n>=tech else '1')
                     elif n==start-1: new.set('collapsed','1')
+                    if index==2 and n==tech-1: new.set('collapsed','1')
                     replacements.append(new)
             cols[:]=replacements
             props=root.find('s:sheetPr',NS)
@@ -358,7 +428,7 @@ def patch_groups(path,state):
             outline=props.find('s:outlinePr',NS)
             if outline is None: outline=E.SubElement(props,'{'+M+'}outlinePr')
             outline.set('summaryRight','0')
-            sf=root.find('s:sheetFormatPr',NS);sf.set('outlineLevelCol','1')
+            sf=root.find('s:sheetFormatPr',NS);sf.set('outlineLevelCol','2' if index==2 else '1')
             edits[part]=E.tostring(root,encoding='utf-8',xml_declaration=True)
         temp=Path(str(path)+'.grouped')
         with ZipFile(temp,'w',ZIP_DEFLATED) as out:
@@ -376,10 +446,7 @@ def write_book(path,state,workdir,original_hash,preview=False):
     patch_groups(staged,state)
     saved=read_book(staged,Path(workdir)/'verify')
     if validate(saved)!=report: raise ValueError('保存后的记录数量校验失败')
-    # Screenshots must retain their original bytes; they are evidence, not new illustrations.
-    before=sorted(p['sha256'] for s in state['sheets'] for r in s['rows'] for p in r.get('_images',[]))
-    after=sorted(p['sha256'] for s in saved['sheets'] for r in s['rows'] for p in r.get('_images',[]))
-    if before!=after: raise ValueError('截图文件校验失败，原表未覆盖')
+    if saved.get('embedded_images'): raise ValueError('保存后仍有图片，原表未覆盖')
     for a,b in zip(state['sheets'],saved['sheets']):
         for old,new in zip(a['rows'],b['rows']):
             for h in a['headers']:
@@ -416,91 +483,128 @@ def fill_template(value,creator):
     if re.search(r'\{\{.*?\}\}',value): raise ValueError('邮件模板仍有未填写字段')
     return value
 
-def refresh(creators,messages,template_path,today):
-    t=templates(template_path)
+def refresh(creators,messages,template_path=None,today=None):
+    """Reconcile actions only. Drafts are written and approved in conversation."""
+    day=rules._now(today).date()
     for c in creators:
-        if c.get('下一步动作')=='暂停联系' or c.get('联系状态') in ('拒绝','勿联系','已完成'):
+        if c.get('下一步动作')=='暂停联系' or c.get('联系状态') in ('拒绝','已拒绝','不合作','勿联系','已完成'):
             c['下一步动作']='暂停联系';c['计划跟进日期']=None;continue
-        records=[m for m in messages if m.get('达人ID')==c['达人ID']]
-        if any(m.get('方向')=='收信' for m in records):
-            c['联系状态']='已回复';c['下一步动作']='回复草稿';c['计划跟进日期']=None
-            for m in records:
-                if m.get('草稿用途')=='跟进' and m.get('处理状态') in ('待确认草稿','已确认草稿'):
-                    m['处理状态']='已作废';m['发送确认批次']=None;m['确认时间']=None;m['确认指纹']=None
+        records=[m for m in messages if m.get('达人ID')==c['达人ID'] and mail_text.is_archive_message(m)]
+        received=[m for m in records if m.get('方向')=='收信']
+        sent=[m for m in records if m.get('方向')=='发信']
+        for direction,field in [('收信','最近收信时间'),('发信','最近发信时间')]:
+            dates=[rules._datetime(m.get('邮件时间')) for m in records if m.get('方向')==direction]
+            dates=[d for d in dates if d]
+            previous=rules._datetime(c.get(field))
+            if dates and (not previous or max(dates)>previous): c[field]=max(dates).isoformat(timespec='seconds')
+        if received:
+            c['联系状态']='已回复';c['计划跟进日期']=None
+            replied={m.get('回复邮件记录ID') for m in sent if m.get('回复邮件记录ID')}
+            last_sent=max((rules._datetime(m.get('邮件时间')) for m in sent if rules._datetime(m.get('邮件时间'))),default=None)
+            def answered(message):
+                when=rules._datetime(message.get('邮件时间'))
+                return message.get('邮件记录ID') in replied or bool(when and last_sent and when<last_sent)
+            c['下一步动作']='等待对方' if all(answered(m) for m in received) else '回复草稿'
             continue
         if not rules.is_valid_email(c.get('Email')): c['下一步动作']='补资料';continue
-        if c.get('分类核实状态')=='待核实' or c.get('首联内容分类') in (None,'','待核实'): c['下一步动作']='核实分类';continue
-        if c.get('联系状态') in ('待联系','未联系') and not any(m.get('方向')=='发信' for m in records):
-            rules.create_draft(creators,messages,c['达人ID'],fill_template(t['first'][0],c),fill_template(t['first'][1],c),t['version'],purpose='首联')
+        if c.get('分类核实状态')=='待核实' or c.get('首联内容分类') in (None,'','待核实'):
+            c['下一步动作']='核实分类';continue
+        # Only explicit, observed initial-send metadata qualifies. Hand-entered
+        # legacy contact dates alone never trigger a reminder.
+        first=rules._datetime(c.get('首次联系日期')) if c.get('首联发送结果')=='成功' else None
+        if first:
+            due=rules.add_workdays(first,7)
+            c['计划跟进日期']=None if sent else due.isoformat()
+            c['下一步动作']='等待对方' if sent or day<due else '跟进草稿'
+        elif c.get('联系状态') in ('待联系','未联系'):
             c['下一步动作']='首联草稿'
-    added=[]
-    for creator in creators:
-        drafts=rules.generate_followup_drafts([creator],messages,today=today,template=fill_template(t['followup'][1],creator))
-        for draft in drafts: draft['模板及版本']=t['version']+' · 未回复跟进'
-        added.extend(drafts)
-    return added
+    mail_text.refresh_summary_states(creators,messages)
+    return []
 
 def main():
-    parser=argparse.ArgumentParser(description='本地达人工作流：归档和草稿，不包含实际发送。')
+    parser=argparse.ArgumentParser(description='本地纯文本邮件归档；草稿在对话审核，不包含发送。')
     parser.add_argument('--book',type=Path,default=DEFAULT_BOOK)
     parser.add_argument('--preview',action='store_true')
     sub=parser.add_subparsers(dest='command',required=True)
-    m=sub.add_parser('migrate');m.add_argument('--evidence',type=Path)
-    sub.add_parser('check')
-    p=sub.add_parser('preview-batch');p.add_argument('record_ids',nargs='+')
+    sub.add_parser('check');sub.add_parser('overview')
+    c=sub.add_parser('context');c.add_argument('creator_id');c.add_argument('--budget',type=int,default=24000);c.add_argument('--cursor',default='0')
+    t=sub.add_parser('convert-text');t.add_argument('--annotations',type=Path,required=True)
     a=sub.add_parser('assign-mail');a.add_argument('record_id');a.add_argument('creator_id')
-    r=sub.add_parser('refresh');r.add_argument('--today',default=datetime.now().date().isoformat())
-    for command in ('import-mail','import-scrape'):
+    r=sub.add_parser('refresh');r.add_argument('--today',default=rules._now().date().isoformat())
+    for command in ('import-mail','import-scrape','update-summaries'):
         p=sub.add_parser(command);p.add_argument('input',type=Path)
-    d=sub.add_parser('draft-reply');d.add_argument('creator_id');d.add_argument('subject');d.add_argument('body_file',type=Path);d.add_argument('--template-version',required=True);d.add_argument('--reply-to',default='')
-    c=sub.add_parser('confirm-batch');c.add_argument('batch_id');c.add_argument('record_ids',nargs='+')
-    s=sub.add_parser('record-result');s.add_argument('record_id');s.add_argument('result',choices=['成功','失败','结果待核实']);s.add_argument('--at',required=True)
+    f=sub.add_parser('fill-mail');f.add_argument('record_id');f.add_argument('input',type=Path)
     args=parser.parse_args();book=args.book.resolve()
     workdir=Path(tempfile.mkdtemp(prefix='tailki-workflow-'))
-    (workdir/'verify').mkdir()
     original_hash=hashlib.sha256(book.read_bytes()).hexdigest()
-    state=read_book(book,workdir)
-    template_path=book.parent/'邮件模板.docx'
-    if args.command=='migrate':
-        evidence=json.loads(args.evidence.read_text()) if args.evidence else None
-        state=migrate(state,evidence,template_path)
+    state=read_book(book,workdir,extract_images=args.command=='convert-text')
+    result=None
+    if args.command=='convert-text':
+        state=convert_text(state,json.loads(args.annotations.read_text(encoding='utf-8')))
     else:
         creators,messages=prepare(state)
         if args.command=='check': print(json.dumps(validate(state),ensure_ascii=False));return
-        if args.command=='preview-batch':
-            for identifier in args.record_ids:
-                matches=[m for m in messages if m.get('邮件记录ID')==identifier]
-                if len(matches)!=1: raise ValueError('邮件记录不存在或不唯一')
-                m=matches[0]
-                print(json.dumps({k:m.get(k) for k in ['邮件记录ID','达人ID','收件人','主题','正文或草稿','草稿版本','处理状态','实际发送结果']},ensure_ascii=False,indent=2))
-            return
-        if args.command=='refresh': refresh(creators,messages,template_path,args.today)
+        if args.command=='overview':
+            print(json.dumps(mail_text.overview(creators,messages),ensure_ascii=False,indent=2));return
+        if args.command=='context':
+            print(json.dumps(mail_text.context(creators,messages,args.creator_id,args.budget,json.loads(args.cursor)),ensure_ascii=False,indent=2));return
+        if args.command=='refresh': refresh(creators,messages,today=args.today)
         elif args.command=='import-scrape':
-            data=json.loads(args.input.read_text()); candidates=data if isinstance(data,list) else data.get('creators',[])
+            data=json.loads(args.input.read_text(encoding='utf-8'));candidates=data if isinstance(data,list) else data.get('creators',[])
             event_time=None if isinstance(data,list) else data.get('抓取时间') or data.get('event_time')
             result=rules.merge_creator_candidates(creators,candidates,event_time=event_time)
             for conflict in result.get('conflicts',[]):
                 cid=conflict.get('达人ID') or conflict.get('creator_id')
                 for creator in creators:
                     if creator.get('达人ID')==cid: issue(creator,'抓取内容与已确认资料冲突，需人工核实')
-            refresh(creators,messages,template_path,datetime.now().date().isoformat())
+            refresh(creators,messages)
         elif args.command=='import-mail':
-            data=json.loads(args.input.read_text()); entries=data if isinstance(data,list) else data.get('messages',[])
-            for incoming in entries: rules.import_message(creators,messages,incoming)
-            refresh(creators,messages,template_path,datetime.now().date().isoformat())
-        elif args.command=='draft-reply': rules.create_draft(creators,messages,args.creator_id,args.subject,args.body_file.read_text(),args.template_version,purpose='回复',in_reply_to=args.reply_to)
-        elif args.command=='confirm-batch': rules.confirm_batch(messages,args.record_ids,args.batch_id)
-        elif args.command=='record-result': rules.record_send_result(creators,messages,args.record_id,args.result,args.at)
+            data=json.loads(args.input.read_text(encoding='utf-8'));entries=data if isinstance(data,list) else data.get('messages',[data] if '方向' in data else [])
+            result=[]
+            for incoming in entries:
+                imported=mail_text.import_message(creators,messages,incoming)
+                metadata=imported.get('首联元信息',{})
+                if metadata:
+                    creator=next((c for c in creators if c['达人ID']==metadata.get('达人ID')),None)
+                    if not creator: raise ValueError('首联元信息需要明确的现有达人ID')
+                    if not re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}',text(metadata.get('首次联系日期'))):
+                        raise ValueError('首联元信息需要完整的实际发送日期和时间')
+                    if not creator.get('首次联系日期') or creator.get('首联发送结果')!='成功':
+                        creator['首次联系日期']=metadata['首次联系日期']
+                    sent_at=rules._datetime(metadata['最近发信时间'])
+                    old_sent=rules._datetime(creator.get('最近发信时间'))
+                    if sent_at and (not old_sent or sent_at>old_sent): creator['最近发信时间']=metadata['最近发信时间']
+                    creator['首联发送结果']='成功'
+                    if creator.get('联系状态') in ('待联系','未联系'): creator['联系状态']='已联系'
+                record=imported.get('记录') or {}
+                result.append({k:v for k,v in imported.items() if k not in ('记录','首联元信息')})
+                result[-1]['邮件记录ID']=record.get('邮件记录ID')
+            refresh(creators,messages)
+        elif args.command=='fill-mail':
+            changed=mail_text.fill_message(creators,messages,args.record_id,json.loads(args.input.read_text(encoding='utf-8')))
+            result={k:v for k,v in changed.items() if k!='记录'}
+            refresh(creators,messages)
         elif args.command=='assign-mail':
             creator=next((c for c in creators if c['达人ID']==args.creator_id),None)
             record=next((m for m in messages if m['邮件记录ID']==args.record_id),None)
             if not creator or not record: raise ValueError('达人ID或邮件记录ID不存在')
             if record.get('处理状态')!='待人工归属': raise ValueError('仅可人工关联待归属记录')
-            record['达人ID']=creator['达人ID'];record['处理状态']='历史截图待核实' if not record.get('邮件时间') else '待回复'
+            record['达人ID']=creator['达人ID'];record['达人昵称']=creator.get('达人昵称')
+            record['处理状态']='历史文本待核实' if not record.get('邮件时间') else '待回复'
             record['核实说明']=(text(record.get('核实说明'))+'\n已由人工明确达人归属。').strip()
-            refresh(creators,messages,template_path,datetime.now().date().isoformat())
+            refresh(creators,messages)
+        elif args.command=='update-summaries':
+            data=json.loads(args.input.read_text(encoding='utf-8'))
+            for key,summary in data.get('messages',{}).items():
+                record=next((m for m in messages if m['邮件记录ID']==key),None)
+                if not record: raise ValueError('邮件记录ID不存在：'+key)
+                mail_text.set_mail_summary(record,summary)
+            for key,summary in data.get('creators',{}).items():
+                creator=next((c for c in creators if c['达人ID']==key),None)
+                if not creator: raise ValueError('达人ID不存在：'+key)
+                mail_text.set_creator_summary(creator,messages,summary)
     report=write_book(book,state,workdir,original_hash,args.preview)
-    print(json.dumps({'saved':str(book),**report,'preview_dir':str(workdir/'previews') if args.preview else None},ensure_ascii=False))
+    print(json.dumps({'saved':str(book),**report,'result':result,'preview_dir':str(workdir/'previews') if args.preview else None},ensure_ascii=False))
 
 if __name__=='__main__':
     try: main()

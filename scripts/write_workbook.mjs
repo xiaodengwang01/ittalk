@@ -17,6 +17,10 @@ if (input.endsWith('.xlsx')) {
   process.exit(0);
 }
 const spec = JSON.parse(await fs.readFile(input,'utf8'));
+for (const tab of spec.sheets) {
+  if (tab.headers.includes('历史截图')) throw Error('纯文本工作簿不能包含历史截图列。');
+  if (tab.rows.some(row => (row._images || []).length)) throw Error('纯文本工作簿不能写入图片，请先转录正文。');
+}
 const wb = Workbook.create();
 const purple = '#705CBC';
 const col = n => { let s=''; for(n++;n;n=Math.floor((n-1)/26)) s=String.fromCharCode(65+(n-1)%26)+s; return s; };
@@ -29,14 +33,24 @@ const choices = {
   '联系状态':['待联系','已联系','跟进中','已回复','拒绝','合作中','已完成','勿联系','待核实'],
   '下一步动作':['补资料','核实分类','首联草稿','回复草稿','跟进草稿','等待对方','暂停联系'],
   '方向':['收信','发信','待核实'],
-  '处理状态':['待处理','待回复','已归档','待人工归属','历史截图待核实','待确认草稿','已确认待发送','已发送','发送失败','发送结果待核实','已作废'],
-  '实际发送结果':['未发送','成功','失败','结果待核实'],
-  '草稿用途':['首联','回复','跟进','历史'],
+  '处理状态':['待处理','待回复','已归档','待人工归属','历史文本待核实','已发送'],
+  '正文完整性':['完整','部分','待核实','缺失'],
+  '摘要状态':['有效','待更新'],
+  '沟通摘要状态':['有效','待更新'],
+  '实际发送结果':['成功'],
+  '邮件用途':['收信','回复'],
   '宠物类型':['Dog','Cat','Dog+Cat','Cat+Dog','Other'],
   '是否低粉高播放':['是','否'], '是否带货类似产品':['是','否'],
   '是否寄样':['否','准备寄出','已寄出','已签收'],
   '到货情况':['未寄出','运输中','已签收','异常'],
   '是否发布':['否','待发布','是'],'是否授权素材':['否','待确认','是'],
+};
+const widths = {
+  '沟通摘要':58, '沟通摘要状态':16, '邮件摘要':62, '邮件正文':90,
+  '邮件记录ID':18, '达人ID':17, '达人昵称':24, '方向':10,
+  '邮件时间':21, '主题':52, '处理状态':22, '正文完整性':16, '摘要状态':15,
+  '发件人':32, '收件人':32, '原邮件定位':40, '邮件原始时间':24,
+  '核实说明':62, '记录来源':24,
 };
 for (const tab of spec.sheets) {
   const sheet = wb.worksheets.add(tab.name);
@@ -51,6 +65,7 @@ for (const tab of spec.sheets) {
       const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : String(value).replace(' ','T')+'Z';
       return new Date(normalized);
     }
+    // The value setter consumes this escape, keeping formula-like source text literal.
     if (typeof value === 'string' && value.startsWith('=')) return `'${value}`;
     return value;
   }));
@@ -61,7 +76,7 @@ for (const tab of spec.sheets) {
   const area = sheet.getRange(`A1:${last}${lastRow}`);
   area.format.font = {name:'Arial',size:10,color:'#243042'};
   area.format.verticalAlignment = 'center';
-  area.format.rowHeight = tab.name==='达人开发主表'?36:42;
+  area.format.rowHeight = tab.name==='达人开发主表'?64:50;
   area.format.wrapText = false;
   const header = sheet.getRange(`A1:${last}1`);
   header.format.fill = purple;
@@ -72,7 +87,7 @@ for (const tab of spec.sheets) {
   for (let i=0;i<headers.length;i++) {
     const h=headers[i];
     const range=sheet.getRange(`${col(i)}1:${col(i)}${lastRow}`);
-    range.format.columnWidth = tab.widths?.[h] || (h.includes('ID')?17: h.includes('时间')||h.includes('日期')?20:20);
+    range.format.columnWidth = tab.widths?.[h] || widths[h] || 20;
     const body=sheet.getRange(`${col(i)}2:${col(i)}${Math.max(lastRow,500)}`);
     if (dates.has(h)) body.setNumberFormat(h==='计划跟进日期'||h==='首次联系日期'||h==='历史跟进日期'||h==='发布日期'?'yyyy-mm-dd':'yyyy-mm-dd hh:mm');
     if (dates.has(h)) for(let r=0;r<tab.rows.length;r++) {
@@ -80,23 +95,17 @@ for (const tab of spec.sheets) {
     }
     if (numbers.has(h)) body.setNumberFormat(h==='综合评分'?'0.00':'#,##0');
     if (choices[h]) body.dataValidation={rule:{type:'list',values:choices[h]}};
-    if (h==='资料核实说明'||h==='核实说明') {
+    if (['资料核实说明','核实说明','沟通摘要','邮件摘要','邮件正文','主题'].includes(h)) {
       range.format.wrapText = true;
       range.format.verticalAlignment = 'top';
-    }
-    if (h==='正文或草稿') {
-      range.format.wrapText = true;
-      range.format.verticalAlignment = 'top';
-      for(let r=0;r<tab.rows.length;r++) {
-        const text=String(tab.rows[r][h]||'');
-        const lines=text.split('\n').reduce((n,line)=>n+Math.max(1,Math.ceil(line.length/85)),0);
-        sheet.getRange(`A${r+2}:${last}${r+2}`).format.rowHeight=Math.min(405,Math.max(72,lines*12+12));
-      }
     }
     if (h==='下一步动作'||h==='计划跟进日期'||h==='分类核实状态') body.format.fill='#FFF6DE';
     if (h==='分类核实状态'||h==='下一步动作') {
       body.conditionalFormats.add('containsText',{text:'待核实',format:{fill:'#FFF1D6',font:{color:'#8A5700'}}});
       if(h==='下一步动作') body.conditionalFormats.add('containsText',{text:'暂停',format:{fill:'#FCE8E6',font:{color:'#9D2823'}}});
+    }
+    if (h==='摘要状态'||h==='沟通摘要状态') {
+      body.conditionalFormats.add('containsText',{text:'待更新',format:{fill:'#FFF1D6',font:{color:'#8A5700'}}});
     }
   }
   if (tab.name==='达人开发主表') {
@@ -113,25 +122,16 @@ for (const tab of spec.sheets) {
       const address=`${col(c)}${r+2}`;
       wb.notes.add({id:`${tab.name}:${address}`,target:{cell:{sheetName:sheet.name,sheetId:sheet.sheetId,address}},authorId:'',createdAt:'',body:{plainText:String(text)}});
     }
-    const imageIndex=headers.indexOf('历史截图');
-    for(const picture of tab.rows[r]._images||[]) {
-      if(imageIndex<0) throw Error('截图缺少目标列');
-      const bytes=await fs.readFile(picture.path);
-      const width=Math.min(480,picture.width||480,500*(picture.width||480)/(picture.height||240));
-      const height=width*(picture.height||240)/(picture.width||480);
-      sheet.images.add({dataUrl:`data:image/png;base64,${bytes.toString('base64')}`,anchor:{from:{row:r+1,col:imageIndex},extent:{widthPx:width,heightPx:height}}});
-      sheet.getRange(`${col(imageIndex)}${r+2}`).format.rowHeight=Math.max(sheet.getRange(`${col(imageIndex)}${r+2}`).format.rowHeight||0,Math.min(405,height*.75+8));
-    }
   }
   sheet.freezePanes.freezeRows(1);
-  sheet.freezePanes.freezeColumns(2);
+  sheet.freezePanes.freezeColumns(tab.name==='邮件记录'?3:2);
 }
 wb.recalculate();
 const errors=await wb.inspect({kind:'match',searchTerm:'#REF!|#DIV/0!|#VALUE!|#NAME\\?|#NUM!|#NULL!',options:{useRegex:true,maxResults:10},maxChars:1000});
 if (!errors.ndjson.includes('matched 0')) console.error(errors.ndjson);
 if(previewDir) {
   await fs.mkdir(previewDir,{recursive:true});
-  for(const [name,range,file] of [['达人开发主表','A1:H10','main.png'],['达人开发主表','H1:P8','main-data.png'],['邮件记录','B1:I4','mail.png']]) {
+  for(const [name,range,file] of [['达人开发主表','A1:G7','main.png'],['达人开发主表','H1:P8','main-data.png'],['邮件记录','A1:J6','mail.png']]) {
     const blob=await wb.render({sheetName:name,range,scale:1,format:'png'});
     await fs.writeFile(path.join(previewDir,file),new Uint8Array(await blob.arrayBuffer()));
   }
