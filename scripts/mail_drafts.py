@@ -113,7 +113,7 @@ def load_templates(path):
 
 
 def fill_text(row, templates, planned_date):
-    if row.get("联系状态") != "初次建联未回复":
+    if row.get("联系状态") not in ("初次建联未回复", "待首联确认"):
         raise DraftError("联系状态不在本批首联范围。")
     if any(row.get(k) for k in ("对方第一次回信日期", "对方第一次回复邮件原始文本",
                                 "我方第一次回复邮件日期", "我们的第一次回复邮件原始文本")):
