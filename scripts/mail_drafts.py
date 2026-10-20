@@ -242,6 +242,11 @@ def prepare(state, book, template, ids, *, batch_id, planned_date="", expected_c
         if json.loads(previous[0])["sources"] != sources:
             raise DraftError("源文件或选择名单已变化；保留已有草稿，请先核实本批内容。")
         return report(state, batch_id)
+    # This project has one authoritative creator list. Renaming that workbook
+    # must not permit the same stable creator IDs to acquire another first draft.
+    existing_ids = {json.loads(row[0])["creator_id"] for row in state.db.execute("SELECT data FROM drafts")}
+    if existing_ids.intersection(ids):
+        raise DraftError("所选达人已有首联草稿批次；工作簿改名不构成新的首联，不重复创建。")
     templates = load_templates(template)
     with tempfile.TemporaryDirectory(prefix="tailki-read-") as workdir:
         workbook = workflow.read_book(book, workdir, extract_images=False)
@@ -283,6 +288,54 @@ def prepare(state, book, template, ids, *, batch_id, planned_date="", expected_c
     except sqlite3.IntegrityError as error:
         raise DraftError("所选达人已有首联草稿批次，保留原稿，不重复创建。") from error
     return report(state, batch_id)
+
+
+def refresh_source(state, batch_id, book, template=None):
+    """Rebind changed source files only if every frozen mail payload still matches."""
+    batch = state.batch(batch_id)
+    previous = batch["sources"]
+    book = Path(book).resolve()
+    template = Path(template or previous["template"]).resolve()
+    sources = {**previous, "book": str(book), "template": str(template),
+               "book_hash": digest(book.read_bytes()), "template_hash": digest(template.read_bytes())}
+    if sources == previous:
+        return {**report(state, batch_id), "source_refreshed": False}
+    items = state.items(batch_id)
+    if batch.get("blocked") or {x["creator_id"] for x in items} != set(previous["ids"]):
+        raise DraftError("本批仍有未解决的筛选问题，不能更新来源。")
+    with tempfile.TemporaryDirectory(prefix="tailki-read-") as workdir:
+        workbook = workflow.read_book(book, workdir, extract_images=False)
+    sheet = next((s for s in workbook["sheets"] if s["name"] == "达人开发主表"), None)
+    if not sheet:
+        raise DraftError("没有找到达人开发主表。")
+    selected = {}
+    for row in sheet["rows"]:
+        identifier = row.get("达人ID")
+        if identifier in previous["ids"]:
+            if identifier in selected:
+                raise DraftError("所选达人编号在新来源中重复，未更新批次。")
+            selected[identifier] = row
+    templates = load_templates(template)
+    for item in items:
+        row = selected.get(item["creator_id"])
+        if row is None:
+            raise DraftError("新来源缺少本批达人，未更新批次。")
+        candidate = fill_text(row, templates, previous["planned_date"])
+        if candidate["content_hash"] != item["content_hash"] or candidate["category"] != item["category"]:
+            raise DraftError("本批收件人、分类或正文已变化，保留原稿，不能仅更新来源。")
+    if digest(book.read_bytes()) != sources["book_hash"] or digest(template.read_bytes()) != sources["template_hash"]:
+        raise DraftError("核对期间来源已变化，未更新批次。")
+    batch.setdefault("source_reviews", []).append({"previous": previous, "reviewed_at": now()})
+    batch["sources"] = sources
+    try:
+        with state.db:
+            state.db.execute("UPDATE batches SET data=? WHERE id=?", (json.dumps(batch, ensure_ascii=False), batch_id))
+            for item in items:
+                scope = digest([str(book), item["creator_id"], "first-contact"])
+                state.db.execute("UPDATE drafts SET scope=? WHERE id=?", (scope, item["id"]))
+    except sqlite3.IntegrityError as error:
+        raise DraftError("新来源存在重复首联批次，未更新。") from error
+    return {**report(state, batch_id), "source_refreshed": True}
 
 
 def source_check(state, batch_id):
@@ -706,6 +759,10 @@ def main(argv=None):
     setup_parser.add_argument("--account")
     setup_parser.add_argument("--drafts-folder")
     setup_parser.add_argument("--sent-folder")
+    refresh_parser = sub.add_parser("refresh-source", help="核对现有邮件逐封不变后，更新改名或新增行后的源文件关联")
+    refresh_parser.add_argument("batch")
+    refresh_parser.add_argument("--book", type=Path, required=True)
+    refresh_parser.add_argument("--template", type=Path)
     for command in ("audit", "save", "verify"):
         item_parser = sub.add_parser(command)
         item_parser.add_argument("batch")
@@ -724,6 +781,8 @@ def main(argv=None):
                 result = report(state, args.batch, show=True)
         elif args.command == "setup":
             result = setup(state, args)
+        elif args.command == "refresh-source":
+            result = refresh_source(state, args.batch, args.book, args.template)
         elif args.command == "verify" and args.local:
             result = report(state, args.batch, show=args.show)
         else:

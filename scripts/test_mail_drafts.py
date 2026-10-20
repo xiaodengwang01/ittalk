@@ -164,6 +164,52 @@ class DraftTests(unittest.TestCase):
             self.prepare(batch="SIM-ANOTHER")
         self.assertEqual(self.state.db.execute("SELECT count(*) FROM batches").fetchone()[0], 1)
 
+    def test_workbook_rename_cannot_bypass_creator_deduplication(self):
+        self.prepare()
+        renamed = self.directory / "renamed.xlsx"
+        renamed.write_bytes(self.book.read_bytes())
+        with self.assertRaises(m.DraftError):
+            m.prepare(self.state, renamed, self.template, ["SIM-001"], batch_id="SIM-NEW",
+                      planned_date="2026-10-20")
+
+    def test_source_refresh_accepts_rename_and_new_rows_preserving_existing_drafts(self):
+        self.prepare()
+        before = self.state.items("SIM-BATCH")
+        renamed = self.directory / "renamed.xlsx"
+        renamed.write_bytes(b"new rows added in source workbook")
+        self.book.unlink()
+        workbook = {"sheets": [{"name": "达人开发主表", "rows": self.rows + [creator("SIM-003")]}]}
+        with patch.object(m.workflow, "read_book", return_value=workbook):
+            result = m.refresh_source(self.state, "SIM-BATCH", renamed)
+        self.assertTrue(result["source_refreshed"])
+        self.assertEqual(self.state.items("SIM-BATCH"), before)
+        self.assertEqual(self.state.batch("SIM-BATCH")["sources"]["book"], str(renamed.resolve()))
+        m.source_check(self.state, "SIM-BATCH")
+        self.assertFalse(m.refresh_source(self.state, "SIM-BATCH", renamed)["source_refreshed"])
+
+    def test_source_refresh_rejects_changed_recipient_without_partial_updates(self):
+        self.prepare()
+        before = self.state.batch("SIM-BATCH")
+        self.book.write_bytes(b"changed recipient in source")
+        rows = copy.deepcopy(self.rows)
+        rows[1]["Email"] = "changed@example.invalid"
+        with patch.object(m.workflow, "read_book", return_value={"sheets": [{"name": "达人开发主表", "rows": rows}]}):
+            with self.assertRaises(m.DraftError):
+                m.refresh_source(self.state, "SIM-BATCH", self.book)
+        self.assertEqual(self.state.batch("SIM-BATCH"), before)
+
+    def test_source_refresh_preserves_remote_web_edits(self):
+        self.prepare()
+        m.save(self.state, "SIM-BATCH", self.mailbox)
+        item = self.state.items("SIM-BATCH")[0]
+        self.mailbox.messages[item["id"]]["remote"]["body"] = "Edited in webmail"
+        m.verify(self.state, "SIM-BATCH", self.mailbox)
+        before = self.state.items("SIM-BATCH")
+        self.book.write_bytes(b"unrelated new rows")
+        with patch.object(m.workflow, "read_book", return_value={"sheets": [{"name": "达人开发主表", "rows": self.rows}]}):
+            m.refresh_source(self.state, "SIM-BATCH", self.book)
+        self.assertEqual(self.state.items("SIM-BATCH"), before)
+
     def test_source_changes_do_not_overwrite_prepared_text_or_upload(self):
         self.prepare()
         self.book.write_bytes(b"user changed workbook")
