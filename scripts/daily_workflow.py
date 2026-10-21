@@ -125,18 +125,60 @@ def activate(state, evidence, **paths):
     return value
 
 
+def new_day(day):
+    return {"date": day, "batch": "tailki-" + day.replace("-", ""), "creators": [],
+            "reserved": [], "prepared": False, "rejected": [], "routes": []}
+
+
+def start_today(state, day, evidence, **paths):
+    """Authorize one day's preparation without activating the recurring schedule."""
+    require_instruction(evidence)
+    now = current_time()
+    if day != now.date().isoformat() or timestamp(evidence["user_instruction_at"]).date() != now.date():
+        raise mail.DraftError("单次运行需要北京时间当天的明确指令，不补跑往日。")
+    if evidence.get("scope") != "prepare_only":
+        raise mail.DraftError("单次入口仅准备名单和预览，不授予发送许可。")
+    if not evidence.get("account") or evidence["account"].lower() != state.config().get("account", "").lower():
+        raise mail.DraftError("历史核对账号与当前配置不一致。")
+    checked = timestamp(evidence["checked_at"])
+    if checked.date() != now.date() or not timedelta(0) <= now - checked <= timedelta(hours=24):
+        raise mail.DraftError("单次运行需要当天实际邮箱历史核对。")
+    if (evidence.get("history_folders") != ["INBOX", "Sent", "Drafts"]
+            or evidence.get("unresolved") != [] or not isinstance(evidence.get("sent_contacts"), list)):
+        raise mail.DraftError("收件、已发送和草稿历史核对不完整。")
+    key = "day:" + day
+    previous = get(state, key)
+    if previous is not None:
+        if previous.get("manual_authorization") != evidence:
+            raise mail.DraftError("当天已有批次，不能替换单次授权或重置进度。")
+        return previous
+    before = preflight(state, **paths)
+    for field in ("sources", "creator_ids", "draft_ids", "draft_snapshot"):
+        if evidence.get(field) != before[field]:
+            raise mail.DraftError("单次运行快照已变化，请重新核对：" + field)
+    value = {**new_day(day), "manual_authorization": evidence}
+    put(state, key, value)
+    return value
+
+
 def day_state(state, day):
     now = current_time()
     if day != now.date().isoformat():
         raise mail.DraftError("只处理北京时间当天；不补跑等待期间或往日任务。")
+    key = "day:" + day
+    value = get(state, key)
+    manual = (value or {}).get("manual_authorization")
+    if manual:
+        require_instruction(manual)
+        if (manual.get("scope") != "prepare_only" or timestamp(manual["user_instruction_at"]).date() != now.date()
+                or manual.get("account", "").lower() != state.config().get("account", "").lower()):
+            raise mail.DraftError("当天单次授权已失效或邮箱账号已变化。")
+        return value
     activation = get(state, "activation", {})
     if activation.get("status") != "active" or now < timestamp(activation["first_run"]) or now.hour < 9:
         raise mail.DraftError("计划尚未到明确启用后的运行时间。")
-    key = "day:" + day
-    value = get(state, key)
     if value is None:
-        value = {"date": day, "batch": "tailki-" + day.replace("-", ""), "creators": [],
-                 "reserved": [], "prepared": False, "rejected": [], "routes": []}
+        value = new_day(day)
         put(state, key, value)
     return value
 
@@ -186,9 +228,18 @@ def validate_candidate(candidate, day):
         if (not public_url(post.get("url")) or not isinstance(post.get("views"), int)
                 or isinstance(post["views"], bool) or post["views"] < 0):
             raise mail.DraftError("视频来源或播放数据缺失。")
-        posted = datetime.fromisoformat(post["date"]).date()
-        if posted > observed.date():
-            raise mail.DraftError("视频发布日期不能晚于核实日期。")
+        if post.get("date"):
+            posted = datetime.fromisoformat(post["date"]).date()
+            if posted > observed.date():
+                raise mail.DraftError("视频发布日期不能晚于核实日期。")
+        else:
+            # Preserve the site's visible precision; never invent an exact day
+            # for a label such as "1 week ago".
+            if not re.fullmatch(r"\d+\s*(分钟|小时|天|周)前", str(post.get("date_text", ""))):
+                raise mail.DraftError("需要真实发布日期或网页显示的相对日期。")
+            captured = timestamp(post["observed_at"])
+            if captured.date() != observed.date() or captured > current_time() + timedelta(minutes=5):
+                raise mail.DraftError("相对日期需要当天实际读取时间。")
     if len(posts) < 10 and not candidate.get("样本不足说明"):
         raise mail.DraftError("不足 10 条近期视频时需要说明样本限制。")
     for key in ("粉丝数", "内容能力(1-5)", "宠物人群匹配度(1-5)", "播放能力(1-5)", "联系方式完整度(1-5)"):
@@ -255,7 +306,7 @@ def add_candidates(state, day, data, book=BOOK):
     emails = {str(r.get("Email", "")).strip().lower() for r in sheet["creators"]}
     emails.update(x["recipient"].lower() for x in drafts_snapshot(state))
     # Activation audit includes contacts already sent to but absent from this workbook.
-    history = get(state, "activation", {})["evidence"].get("sent_contacts", [])
+    history = value.get("manual_authorization", get(state, "activation", {}).get("evidence", {})).get("sent_contacts", [])
     emails.update(x["email"].lower() for x in history if x.get("email"))
     accounts.update(profile(x["profile"]) for x in history if x.get("profile"))
     next_id = max(int(re.search(r"\d+$", r["达人ID"]).group()) for r in sheet["creators"]) + 1
@@ -437,6 +488,9 @@ def main():
     p = sub.add_parser("add")
     p.add_argument("day")
     p.add_argument("input", type=Path)
+    p = sub.add_parser("start-today")
+    p.add_argument("day")
+    p.add_argument("input", type=Path)
     for cmd in ("approve", "record-sent"):
         p = sub.add_parser(cmd)
         p.add_argument("batch")
@@ -455,6 +509,8 @@ def main():
             result = activate(state, data, book=args.book)
         elif args.command == "begin":
             result = day_state(state, args.day)
+        elif args.command == "start-today":
+            result = start_today(state, args.day, data, book=args.book)
         elif args.command == "add":
             result = add_candidates(state, args.day, data, book=args.book)
         elif args.command == "prepare":

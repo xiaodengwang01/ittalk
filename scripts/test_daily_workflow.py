@@ -130,6 +130,62 @@ class DailyTests(unittest.TestCase):
         result = d.activate(self.state, evidence, **paths)
         self.assertEqual(result["first_run"], "2026-10-23T09:00:00+08:00")
 
+    def manual_evidence(self):
+        self.state.set_config({"account": "team@example.invalid"})
+        paths = dict(book=self.book, template=self.template, strategy=self.template, reference=self.template)
+        evidence = {**d.preflight(self.state, **paths), "scope": "prepare_only",
+                    "account": "team@example.invalid", "history_folders": ["INBOX", "Sent", "Drafts"],
+                    "unresolved": [], "sent_contacts": [], "checked_at": NOW.isoformat(),
+                    "user_instruction": "模拟：只执行今天的资料搜集和首联预览", "user_instruction_at": NOW.isoformat()}
+        return evidence, paths
+
+    def test_manual_day_preserves_pause_progress_and_send_approval(self):
+        evidence, paths = self.manual_evidence()
+        evidence["sent_contacts"] = [{"email": "sim3@example.invalid"}]
+        d.start_today(self.state, "2026-10-22", evidence, **paths)
+        result = self.add([candidate(2), candidate(3)])
+        self.assertEqual(len(result["added"]), 1)
+        self.assertEqual(len(result["rejected"]), 1)
+        again = d.start_today(self.state, "2026-10-22", evidence, **paths)
+        self.assertEqual(again["creators"], result["added"])
+        self.assertIsNone(d.get(self.state, "activation"))
+        prepared = d.prepare_day(self.state, "2026-10-22", book=self.book, template=self.template)
+        with self.assertRaises(d.mail.DraftError):
+            d.claim_send(self.state, prepared["batch"])
+        with patch.object(d, "current_time", return_value=NOW.replace(day=23)):
+            with self.assertRaises(d.mail.DraftError):
+                d.day_state(self.state, "2026-10-23")
+
+    def test_manual_day_rejects_missing_or_stale_authorization(self):
+        evidence, paths = self.manual_evidence()
+        for change in ({"scope": "send"}, {"account": "other@example.invalid"},
+                       {"user_instruction": ""}, {"user_instruction_at": "2026-10-21T09:00:00+08:00"},
+                       {"checked_at": "2026-10-21T09:00:00+08:00"}, {"history_folders": ["Sent"]},
+                       {"sources": {}}, {"sent_contacts": None}):
+            with self.subTest(change=change), self.assertRaises(d.mail.DraftError):
+                d.start_today(self.state, "2026-10-22", {**evidence, **change}, **paths)
+        self.assertIsNone(d.get(self.state, "day:2026-10-22"))
+        d.start_today(self.state, "2026-10-22", evidence, **paths)
+        with self.assertRaises(d.mail.DraftError):
+            d.start_today(self.state, "2026-10-22", {**evidence, "user_instruction": "模拟替换"}, **paths)
+        self.state.set_config({"account": "other@example.invalid"})
+        with self.assertRaises(d.mail.DraftError):
+            d.day_state(self.state, "2026-10-22")
+
+    def test_relative_video_date_preserves_visible_precision(self):
+        item = candidate()
+        post = item["近期视频"][0]
+        del post["date"]
+        post.update(date_text="1 周前", observed_at=NOW.isoformat())
+        result = d.validate_candidate(item, "2026-10-22")
+        self.assertNotIn("date", result["近期视频"][0])
+        for change in ({"date_text": "未知"}, {"observed_at": "2026-10-21T09:00:00+08:00"},
+                       {"observed_at": "2026-10-23T09:00:00+08:00"}):
+            invalid = copy.deepcopy(item)
+            invalid["近期视频"][0].update(change)
+            with self.subTest(change=change), self.assertRaises(d.mail.DraftError):
+                d.validate_candidate(invalid, "2026-10-22")
+
     def test_append_preserves_parts_literal_history_and_deduplicates(self):
         self.active()
         with ZipFile(self.book) as z:

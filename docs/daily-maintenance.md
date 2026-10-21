@@ -29,6 +29,8 @@
 
 ## 每日 09:00 的执行顺序
 
+若用户明确要求“执行今天”，但没有要求启用后续定时任务，先使用 `start-today YYYY-MM-DD 私有核对文件.json`。私有核对文件包含当天的 `user_instruction/user_instruction_at`、`scope="prepare_only"`、当前配置的 `account`、当天实际历史核对时间 `checked_at`、`history_folders=["INBOX","Sent","Drafts"]`、`unresolved=[]`、`sent_contacts`，以及当前 `preflight` 的 `sources/creator_ids/draft_ids/draft_snapshot`。此入口仅创建当天批次，不改变暂停的定时计划，不要求把未发送草稿视为已发。相同证据重跑会恢复原进度；已有当天批次不能替换授权或清空重建。后续按下文执行 `add`、`prepare`，发送仍需该完整批次的新确认。
+
 先运行 `status` 与 `begin YYYY-MM-DD`。以 Asia/Shanghai 的当天日期为准；暂停、早于第一次运行、09:00 前或补跑旧日期都会被拒绝。复用当天 `tailki-YYYYMMDD` 批次，先恢复中断记录，再继续。不要因一次失败另外建批次或清空状态库。
 
 ### 1. 两路搜集与筛选
@@ -45,7 +47,7 @@ talking dog / talking cat / what my dog is thinking / what my cat is thinking / 
 - `发现路径`（FastMoss/TikTok）、`数据来源`、`邮箱公开来源`、带时区的 `核实时间`。
 - 当天在实际邮箱中检索该邮箱/账号的发送、收信和草稿历史；无既有联系时填 `已联系=false`、`历史核对时间`、`历史核对依据`。仅匹配启动时的历史快照不够，启动后用户可能已在表外联系过。
 - `英语市场依据`、`内容判断`、`宠物匹配判断`、`播放判断`、`活跃判断`，完成实际评估后才设 `合格=true`。
-- `近期视频`：最多 10 项 `{url,date,views}`，播放量为数值；不足 10 项填 `样本不足说明`。程序计算最高及中位播放。
+- `近期视频`：最多 10 项 `{url,date,views}`，播放量为数值；页面仅显示相对日期时保留 `date_text`（如“1 周前”）和当天带时区的 `observed_at`，不要换算成虚构的精确发布日期。不足 10 项填 `样本不足说明`。程序计算最高及中位播放。
 - `是否低粉高播放`、`是否带货类似产品` 为“是/否/空”；填“是”时补同名字段加“依据”。未取得销量数据应标明不可用，不填零。
 
 私有输入格式为 `{"routes_checked":["FastMoss","TikTok"],"creators":[...]}`。执行 `add YYYY-MM-DD 文件.json`，先对当前主表、历史草稿及启动对账的已发送联系人去重。共享邮箱先跳过核实，不能因此把不同达人合并。两路之一不可用时先报告限制；不能假称已完成双路搜索。
@@ -117,4 +119,4 @@ talking dog / talking cat / what my dog is thinking / what my cat is thinking / 
 
 `python3 -m unittest scripts.test_daily_workflow scripts.test_mail_drafts -v`
 
-模拟检查覆盖默认暂停、三项启动条件、下一次 09:00、不补跑、双路候选校验、去重、最多 8 人/缺口、原表和历史保留、中断恢复、模板与完整预览、发送前确认、发送尝试不重试、成功回执才写日期、回信只摘要且不修改表/草稿。真实发送链路须在用户完成后另行核对。
+模拟检查覆盖默认暂停、三项启动条件、下一次 09:00、当天单次授权与幂等恢复、不补跑、相对日期原文保留、双路候选校验、去重、最多 8 人/缺口、原表和历史保留、中断恢复、模板与完整预览、发送前确认、发送尝试不重试、成功回执才写日期、回信只摘要且不修改表/草稿。真实发送链路须在用户完成后另行核对。
