@@ -303,6 +303,59 @@ class SendTests(unittest.TestCase):
         self.assertEqual(result['states'], {'sent_verified': 1, 'not_attempted': 1})
         self.assertEqual(len(transport.submissions), 1)
 
+    def test_resume_after_late_verified_receipt_submits_only_untouched_entries(self):
+        review = self.review()
+        self.approve(review)
+        first = self.transport('unknown')
+        self.send(review, first)
+        self.mailbox.client.data[b'Sent'][b'1'] = first.submissions[0][0]
+        s.reconcile_delivery(self.state, review['id'], self.mailbox)
+        rest = self.transport()
+        result = s.deliver(self.state, review['id'], self.mailbox, lambda config: rest,
+                           pause=lambda seconds: None, resume=True)
+        self.assertEqual(result['states'], {'sent_verified': 2})
+        self.assertEqual(len(first.submissions), 1)
+        self.assertEqual(len(rest.submissions), 1)
+        self.assertEqual(rest.submissions[0][1], ['sim2@example.invalid'])
+        with self.assertRaises(m.DraftError):
+            s.deliver(self.state, review['id'], self.mailbox, lambda config: rest, resume=True)
+
+    def test_resume_never_bypasses_unknown_or_failed_outcomes_or_changed_remaining_content(self):
+        review = self.review()
+        self.approve(review)
+        first = self.transport('unknown')
+        self.send(review, first)
+        factory = unittest.mock.Mock()
+        with self.assertRaises(m.DraftError):
+            s.deliver(self.state, review['id'], self.mailbox, factory, resume=True)
+        factory.assert_not_called()
+        value = s.attempt(self.state, review['entries'][0]['draft_id'])
+        value['status'] = 'failed'
+        s.put_attempt(self.state, review['entries'][0], value)
+        with self.assertRaises(m.DraftError):
+            s.deliver(self.state, review['id'], self.mailbox, factory, resume=True)
+        factory.assert_not_called()
+        self.mailbox.client.data[b'Sent'][b'1'] = first.submissions[0][0]
+        s.reconcile_delivery(self.state, review['id'], self.mailbox)
+        self.edit(uid=b'2', body='Changed after confirmation')
+        with self.assertRaises(m.DraftError):
+            s.deliver(self.state, review['id'], self.mailbox, factory, resume=True)
+        factory.assert_not_called()
+
+    def test_delayed_sent_copy_is_only_polled_and_never_submitted_twice(self):
+        review = self.review()
+        self.approve(review)
+        transport = self.transport('accepted_without_sent_copy')
+        waits = []
+        def delayed_copy(seconds):
+            waits.append(seconds)
+            if len(waits) % 2 == 0:
+                sent = self.mailbox.client.data[b'Sent']
+                sent[str(len(sent)+1).encode()] = transport.submissions[-1][0]
+        result = s.deliver(self.state, review['id'], self.mailbox, lambda config: transport, pause=delayed_copy)
+        self.assertEqual(result['states'], {'sent_verified': 2})
+        self.assertEqual(len(transport.submissions), 2)
+
     def test_acceptance_without_server_sent_copy_stops_and_does_not_fabricate_receipt(self):
         review = self.review()
         self.approve(review)

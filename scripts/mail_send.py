@@ -476,16 +476,28 @@ def reconcile_one(state, review, entry, mailbox):
     return result
 
 
-def deliver(state, identifier, mailbox, smtp_factory=None, *, pause=time.sleep, progress=None):
+def deliver(state, identifier, mailbox, smtp_factory=None, *, pause=time.sleep, progress=None, resume=False):
     review = get_review(state, identifier)
-    if review["status"] != "approved" or not review.get("approval"):
+    required_status = "halted" if resume else "approved"
+    if review["status"] != required_status or not review.get("approval"):
         raise mail.DraftError("尚未取得该最终版本的明确发送确认，未发送。")
     if review_hash(review) != review["hash"] or review["approval"]["review_hash"] != review["hash"]:
         raise mail.DraftError("确认指纹不一致，未发送。")
     if mail.digest(Path(review["preview"]).read_bytes()) != review["preview_hash"]:
         raise mail.DraftError("已确认预览文件变化，须重新预览确认。")
+    pending = review["entries"]
+    if resume:
+        prior = [attempt(state, entry["draft_id"]) for entry in review["entries"]]
+        if not any(prior) or any(value and value["status"] != "sent_verified" for value in prior):
+            raise mail.DraftError("已有尝试尚未全部核实成功；不能继续或重试。先核对已发送记录。")
+        if any(value and (value["review_id"] != identifier or value["receipt"]["mime_hash"] != entry["sent_hash"])
+               for entry, value in zip(review["entries"], prior)):
+            raise mail.DraftError("已有回执与本次确认版不一致，不能继续。")
+        pending = [entry for entry, value in zip(review["entries"], prior) if value is None]
+        if not pending:
+            raise mail.DraftError("本批没有尚未提交的邮件，未重复投递。")
     try:
-        for entry in review["entries"]:
+        for entry in pending:
             check_current(state, review, entry, mailbox)
     except (mail.DraftError, OSError, imaplib.IMAP4.error):
         review["status"] = "stale"
@@ -496,11 +508,11 @@ def deliver(state, identifier, mailbox, smtp_factory=None, *, pause=time.sleep, 
         if transport.account != review["account"]:
             raise mail.DraftError("SMTP 账号与确认批次不同。")
         transport.check()
-        # Consume approval before the first submission. Interrupted batches need
-        # reconciliation and a fresh explicit decision for any untouched rest.
+        # Consume approval before submission. A separate resume operation may
+        # continue untouched entries only after every earlier attempt is verified.
         review["status"] = "dispatching"
         put_review(state, review)
-        for entry in review["entries"]:
+        for entry in pending:
             check_current(state, review, entry, mailbox)
             send_id, stamp = uuid.uuid4().hex, mail.now()
             raw, message_id = outgoing(entry, review, send_id, stamp)
@@ -524,12 +536,14 @@ def deliver(state, identifier, mailbox, smtp_factory=None, *, pause=time.sleep, 
             except DeliveryError as error:
                 result.update(status=error.status, reason=str(error), smtp_code=error.code)
             put_attempt(state, entry, result)
-            for retry in range(3):
+            # Alibaba may publish its Sent copy after the SMTP 250 response.
+            # These are read-only receipt checks, never repeated SMTP delivery.
+            for retry in range(7):
                 result = reconcile_one(state, review, entry, mailbox)
                 if result["status"] == "sent_verified" or result["status"] in ("failed", "needs_review"):
                     break
-                if retry < 2:
-                    pause(2)
+                if retry < 6:
+                    pause(5)
             if progress:
                 progress({"creator_id": entry["creator_id"], "status": result["status"]})
             if result["status"] != "sent_verified":
@@ -582,7 +596,7 @@ def main():
     p = sub.add_parser("approve")
     p.add_argument("review")
     p.add_argument("instruction", type=Path)
-    for command in ("send", "reconcile", "status"):
+    for command in ("send", "resume", "reconcile", "status"):
         sub.add_parser(command).add_argument("review")
     args = parser.parse_args()
     state, mailbox, smtp = mail.State(args.state), None, None
@@ -599,8 +613,9 @@ def main():
             mailbox = mail.connect(state.config())
             if args.command == "review":
                 result = prepare_review(state, mailbox, args.batches.split(','), args.output, expected_count=args.expect_count)
-            elif args.command == "send":
-                result = deliver(state, args.review, mailbox, progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True))
+            elif args.command in ("send", "resume"):
+                result = deliver(state, args.review, mailbox, resume=args.command == "resume",
+                                 progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True))
             else:
                 result = reconcile_delivery(state, args.review, mailbox)
         print(json.dumps(result, ensure_ascii=False, indent=2))
