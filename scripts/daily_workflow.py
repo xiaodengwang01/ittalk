@@ -661,6 +661,7 @@ def main():
     sub.add_parser("confirm-schedule").add_argument("automation_id")
     sub.add_parser("audit-history")
     sub.add_parser("sync-records")
+    sub.add_parser("review")
     sub.add_parser("context").add_argument("creator_id")
     for cmd in ("begin", "prepare"):
         sub.add_parser(cmd).add_argument("day")
@@ -704,6 +705,9 @@ def main():
             result = sync_records(state, book=args.book)
         elif args.command == "context":
             result = records.context(state, args.creator_id)
+        elif args.command == "review":
+            import review_center
+            result = review_center.build(state, book=args.book)
         elif args.command == "begin":
             result = day_state(state, args.day)
         elif args.command == "start-today":
@@ -722,6 +726,9 @@ def main():
             result = claim_send(state, args.batch)
         elif args.command == "record-sent":
             result = record_sent(state, args.batch, data, book=args.book)
+        if args.command in ("prepare", "summarize", "record-sent"):
+            import review_center
+            result["review_center"] = review_center.refresh_after_operation(state, result, book=args.book)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         state.close()

@@ -18,6 +18,8 @@
 
 ## 每日操作
 
+双击 `scripts/今日审核.command`，会重新整理并打开唯一的“今日审核”页面，同时生成当天带教 DOCX。页面集中展示今日新增、带教待决、全部待审邮件和异常；页面中的“查看带教 DOCX”可直接打开文档，“审核意见”可复制后发回聊天。入口本身不收信、不发送、不批准邮件，也不改 Excel。
+
 实际仓库目录为 `/Users/ludwig/Desktop/Tailki`。命令使用 Python 3.9+；表格读写使用 Codex 提供的 Node 与 Artifact Tool。详细筛选与授权规则见 `docs/daily-maintenance.md`。
 
 1. `python3 scripts/daily_workflow.py status` 查看定时准备、当天进度和待处理来信。
@@ -25,6 +27,15 @@
 3. `python3 scripts/daily_workflow.py begin YYYY-MM-DD` 复用北京时间当天批次。新准备任务不需要把历史待确认稿发完；未决项仍保留，逐位实时查重。
 4. 在已登录的内置浏览器搜集候选，使用 `add 日期 本机输入.json`、`prepare 日期` 入表并生成全部首联预览。缺项或未核实不凑数。
 5. `python3 scripts/mail_inbox.py` 只采集收件箱未读正文，保留未读标记。按策略文档形成摘要后，使用 `daily_workflow.py summarize 本机摘要.json` 入队；默认不承诺商务条件或发送回复。
+6. `python3 scripts/daily_workflow.py review` 汇总更新统一审核页面及当天带教文档。`prepare/summarize/record-sent` 和发送收尾命令也会自动刷新；生成失败不改变已完成的业务结果，重新打开入口恢复。
+
+页面默认保存到原本机状态目录的 `review/今日审核.html`，复用同一入口；当天 DOCX 位于业务目录 `参考资料/YYYY-MM-DD_KOL跟进.docx`。同输入重复运行复用文档。人工改过的已登记文档先导入修改再更新；遇到未登记的同名文件、结构无法识别或生成期间人工改动，停止覆盖。已发送邮件及其旧预览不会重新列为待发。
+
+已有手工带教文档可以通过 `python3 scripts/review_center.py adopt-report /本机/已有报告.docx` 导入。一级标题按达人分节，段落包含可关联邮箱；回复稿使用“收件人：”“主题：”行，支持明确的抄送/密送和内嵌图片。图片按内容哈希留在同一本机状态目录，不再依赖聊天临时文件。原文档保留。归属不清、缺主题/正文或占位符未填时拒绝导入。
+
+消息与关键表格字段各自绑定审核资料版本；出现新来信、人工改表或图片变化时，停止展示旧完整稿并列为待更新。复制审核意见、导入文档、同意商务方向均不替代完整最终版本的发送确认。带教文档与页面来自同一快照，文档主要收录新增概况、待决背景及已明确要求准备的回复；全部首联全文统一在页面审核。
+
+每次交付新版本 DOCX 前，使用 documents 技能的 `render_docx.py` 渲染并逐页检查。未改动文档复用既有 QA；新哈希不得沿用旧 QA。批量网页稿只含缓存文本而未取得完整 MIME 时明确标为待核对，附件不完整的稿件不冒充最终预览。
 
 `daily_workflow.py sync-records` 将已经合法采集的本机来信、摘要和指定联系人历史邮件头统一关联，不连接邮箱、不改表、不补扫已读正文。
 `daily_workflow.py context 达人ID` 查看该达人的本机已记录单封往来及计数。计数注明覆盖范围，不能把未采集的历史当成不存在。
@@ -69,7 +80,7 @@ SMTP 操作入口为 `python3 scripts/mail_send.py`：
 ## 检查与上传
 
 ```bash
-python3 -B -m unittest scripts.test_daily_workflow scripts.test_mail_postprocess scripts.test_mail_send scripts.test_mail_inbox scripts.test_mail_drafts scripts.test_mail_text scripts.test_workflow_rules scripts.test_workflow_adapter -q
+python3 -B -m unittest scripts.test_review_center scripts.test_daily_workflow scripts.test_mail_postprocess scripts.test_mail_send scripts.test_mail_inbox scripts.test_mail_drafts scripts.test_mail_text scripts.test_workflow_rules scripts.test_workflow_adapter -q
 ```
 
 检查使用模拟联系人及 `.invalid` 邮箱，不连接真实 SMTP。真实名单、邮件、凭据、预览、备份和运行记录不上传。

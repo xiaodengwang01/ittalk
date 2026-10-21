@@ -627,6 +627,9 @@ def main():
             else:
                 result = reconcile_delivery(state, args.review, mailbox)
                 result["postprocess"] = finalize(state, args.review, mailbox, args.book)
+        if args.command in ("send", "resume", "reconcile", "finalize", "finalize-pending"):
+            import review_center
+            result["review_center"] = review_center.refresh_after_operation(state, result, book=args.book)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         if smtp:
