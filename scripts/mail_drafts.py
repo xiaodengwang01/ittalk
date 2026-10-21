@@ -536,7 +536,7 @@ class Mailbox:
                     found.append({"folder": name, "uid": uid.decode("ascii")})
         return found
 
-    def find(self, item, *, sent=False):
+    def find(self, item, *, sent=False, include_raw=False):
         folder = self.sent if sent else self.drafts
         validity, headers = self.header_index(folder["raw"], refresh=not sent)
         uids = set()
@@ -551,8 +551,12 @@ class Mailbox:
                 uids.add(uid)
         results = []
         for uid in sorted(uids):
-            results.append({"uid": uid.decode("ascii"), "uidvalidity": validity,
-                            "folder": folder["name"], "remote": snapshot(self.fetch(uid))})
+            raw = self.fetch(uid)
+            result = {"uid": uid.decode("ascii"), "uidvalidity": validity,
+                      "folder": folder["name"], "remote": snapshot(raw)}
+            if include_raw:
+                result["raw"] = raw
+            results.append(result)
         return results
 
     def existing_drafts(self, recipient):
@@ -571,6 +575,10 @@ class Mailbox:
 
 
 def reconcile(state, item, mailbox):
+    if item.get("smtp_attempt"):
+        # SMTP attempts have their own receipt reconciliation. Retained draft
+        # copies must never reset an attempted/sent message to sendable status.
+        return item
     found = mailbox.find(item)
     if len(found) > 1:
         state.update(item, status="needs_review", reason="发现多个关联草稿，未改动任何邮件。")
