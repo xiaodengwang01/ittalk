@@ -1,5 +1,6 @@
 """Synthetic-only checks for local text preparation and IMAP draft safety."""
 import copy
+import ctypes as C
 import io
 import json
 from pathlib import Path
@@ -357,6 +358,59 @@ class DraftTests(unittest.TestCase):
         finally:
             output.unlink()
             output.parent.rmdir()
+
+
+class KeychainTests(unittest.TestCase):
+    def keychain(self, found, *, add=None, modify=None):
+        keychain = m.Keychain.__new__(m.Keychain)
+        released = []
+        keychain._find = lambda account: found
+        def unexpected(*args):
+            self.fail("Unexpected Keychain operation")
+        keychain.sec = SimpleNamespace(
+            SecKeychainAddGenericPassword=add or unexpected,
+            SecKeychainItemModifyAttributesAndData=modify or unexpected,
+        )
+        keychain.cf = SimpleNamespace(CFRelease=lambda item: released.append(item.value))
+        return keychain, released
+
+    def test_first_password_save_passes_writable_native_item_pointer(self):
+        received = []
+        def add(keychain, service_length, service, account_length, account, size, secret, output):
+            self.assertEqual(account_length, len(account))
+            self.assertEqual(size, len(secret))
+            C.cast(output, C.POINTER(C.c_void_p))[0] = 123
+            received.append((account, secret))
+            return 0
+        keychain, released = self.keychain((None, None), add=add)
+        keychain.set("sara@example.invalid", "simulated-private-value")
+        self.assertEqual(received, [(b"sara@example.invalid", b"simulated-private-value")])
+        self.assertEqual(released, [123])
+
+    def test_existing_password_is_updated_without_adding_another_item(self):
+        received = []
+        def modify(item, attributes, size, secret):
+            received.append((item.value, secret))
+            return 0
+        keychain, released = self.keychain(("old-simulated-value", C.c_void_p(456)), modify=modify)
+        keychain.set("sara@example.invalid", "new-simulated-value")
+        self.assertEqual(received, [(456, b"new-simulated-value")])
+        self.assertEqual(released, [456])
+
+    def test_failed_native_save_does_not_echo_password(self):
+        keychain, released = self.keychain((None, None), add=lambda *args: -25291)
+        with self.assertRaises(m.CredentialError) as caught:
+            keychain.set("sara@example.invalid", "simulated-private-value")
+        self.assertNotIn("simulated-private-value", str(caught.exception))
+        self.assertEqual(released, [])
+
+    def test_read_releases_item_and_missing_entry_requests_local_setup(self):
+        keychain, released = self.keychain(("simulated-private-value", C.c_void_p(789)))
+        self.assertEqual(keychain.get("sara@example.invalid"), "simulated-private-value")
+        self.assertEqual(released, [789])
+        keychain, released = self.keychain((None, None))
+        with self.assertRaises(m.CredentialError):
+            keychain.get("sara@example.invalid")
 
 
 class FakeIMAP:

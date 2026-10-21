@@ -91,6 +91,7 @@ class Keychain:
             if item:
                 status = self.sec.SecKeychainItemModifyAttributesAndData(item, None, len(raw), raw)
             else:
+                item = C.c_void_p()
                 status = self.sec.SecKeychainAddGenericPassword(
                     None, len(SERVICE), SERVICE, len(name), name,
                     len(raw), raw, C.byref(item),
