@@ -463,6 +463,13 @@ def record_sent(state, batch, receipts, book=BOOK):
             cells[f"G{row['_row']}"] = {"value": day, "date": True}
         if row.get("联系状态") == "待首联确认":
             cells[f"C{row['_row']}"] = {"value": "初次建联未回复"}
+        # Replace only our own preparation marker, preserving all source notes
+        # and any human edits around it.
+        pending_note = "每日批次：" + batch + "\n首联未发送；"
+        note = row.get("备注", "")
+        if isinstance(note, str) and note.startswith(pending_note):
+            cells[f"O{row['_row']}"] = {"value": "每日批次：" + batch +
+                                      "\n首联已发送（" + day + "）；" + note[len(pending_note):]}
         accepted.append((item, receipt))
     if cells:
         workbook.patch_cells(book, cells, expected_hash=book_hash,

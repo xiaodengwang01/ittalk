@@ -244,6 +244,7 @@ class DailyTests(unittest.TestCase):
         batch = result["batch"]
         one = self.state.items(batch)[0]
         saved = self.book.read_bytes()
+        before_note = d.workbook.read(self.book)["creators"][-1]["备注"]
         d.prepare_day(self.state, "2026-10-22", self.book, self.template)
         self.assertEqual(len(self.state.items(batch)), 1)
         self.assertEqual(saved, self.book.read_bytes())
@@ -267,6 +268,7 @@ class DailyTests(unittest.TestCase):
         row = d.workbook.read(self.book)["creators"][-1]
         self.assertEqual(row["初次建联日期"], "2026-10-22")
         self.assertEqual(row["联系状态"], "初次建联未回复")
+        self.assertEqual(row["备注"], before_note.replace("首联未发送；", "首联已发送（2026-10-22）；", 1))
         saved = self.book.read_bytes()
         d.record_sent(self.state, batch, {one["id"]: receipt}, self.book)
         self.assertEqual(saved, self.book.read_bytes())
