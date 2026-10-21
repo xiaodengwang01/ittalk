@@ -72,7 +72,10 @@ def parse(raw):
         raise mail.DraftError("邮件格式不完整，停止处理，保留原草稿。")
     for header in (*ADDRESS_HEADERS, "Subject", "Sender", "Message-ID", "In-Reply-To", "References"):
         values = message.get_all(header, [])
-        if len(values) > 1 or any(getattr(value, "defects", ()) for value in values):
+        # Alibaba Webmail sometimes saves <uuid.> without a domain as the draft
+        # Message-ID. It is never used on the SMTP wire: outgoing() replaces it.
+        # Routing/visible headers and duplicate Message-ID headers stay strict.
+        if len(values) > 1 or (header != "Message-ID" and any(getattr(value, "defects", ()) for value in values)):
             raise mail.DraftError("邮件头重复或格式不明，停止处理。")
     if any(key.lower().startswith("resent-") for key in message.keys()):
         raise mail.DraftError("首联草稿含重新投递邮件头，需单独核实。")
@@ -137,12 +140,32 @@ def inspect(raw, account):
             "hash": mail.digest(content(raw)), "sent_hash": mail.digest(content(raw, hide_bcc=True))}
 
 
-def read_final(state, item, mailbox):
+def read_final(state, item, mailbox, *, allow_relink=False):
     found = mailbox.find(item, include_raw=True)
+    relinked = False
+    if not found and allow_relink and not item.get("smtp_attempt"):
+        # Webmail may replace the UID and remove both tracking headers. Recover
+        # only a unique, unchanged, attachment-free template draft for this exact
+        # recipient. Changed or ambiguous candidates require manual attribution.
+        candidates = mailbox.existing_drafts(item["recipient"])
+        if len(candidates) == 1:
+            validity = mailbox.select(mailbox.drafts["raw"])
+            raw = mailbox.fetch(candidates[0].encode("ascii"))
+            snapshot = mail.snapshot(raw)
+            if mail.matches_original(item, snapshot):
+                inspect(raw, mailbox.account)
+                found = [{"raw": raw, "remote": snapshot, "uid": candidates[0],
+                          "uidvalidity": validity, "folder": mailbox.drafts["name"]}]
+                relinked = True
     if len(found) != 1:
         raise mail.DraftError(item["creator_id"] + "：草稿缺失或存在多个关联版本，未重新创建。")
     remote = found[0]
     details = inspect(remote["raw"], mailbox.account)
+    if relinked:
+        history = item.get("web_relinks", []) + [{"at": mail.now(), "old_uid": item.get("uid"),
+                    "old_uidvalidity": item.get("uidvalidity"), "new_uid": remote["uid"],
+                    "new_uidvalidity": remote["uidvalidity"], "basis": "unique_recipient_and_complete_original_text"}]
+        state.update(item, web_relinks=history)
     state.update(item, **{key: remote[key] for key in ("uid", "uidvalidity", "folder", "remote")},
                  status="saved" if mail.matches_original(item, remote["remote"]) else "edited")
     return remote, details
@@ -183,7 +206,7 @@ def prepare_review(state, mailbox, batches, output, *, expected_count):
         raise mail.DraftError("可核对的远端草稿数与本批预期不一致：" + str(len(items)))
     entries, seen = [], set()
     for item in items:
-        remote, details = read_final(state, item, mailbox)
+        remote, details = read_final(state, item, mailbox, allow_relink=True)
         history_check(mailbox, details, draft_uid=remote["uid"])
         recipient = details["envelope"]["to"][0]
         if recipient in seen:
@@ -193,7 +216,8 @@ def prepare_review(state, mailbox, batches, output, *, expected_count):
                         "creator_id": item["creator_id"], "name": item["name"], "category": item["category"],
                         "uid": remote["uid"], "uidvalidity": remote["uidvalidity"], "folder": remote["folder"],
                         "raw_b64": base64.b64encode(remote["raw"]).decode("ascii"), "details": details,
-                        "content_hash": details["hash"], "sent_hash": details["sent_hash"], "edited": item["status"] == "edited"})
+                        "content_hash": details["hash"], "sent_hash": details["sent_hash"], "edited": item["status"] == "edited",
+                        "web_resaved": bool(item.get("web_relinks"))})
     review = {"account": mailbox.account, "batches": batches, "entries": entries, "excluded": excluded,
               "reviewed_at": mail.now(), "status": "awaiting_confirmation"}
     review["hash"] = review_hash(review)
@@ -212,6 +236,7 @@ def prepare_review(state, mailbox, batches, output, *, expected_count):
 def summary(review):
     return {"review": review["id"], "hash": review["hash"], "status": review["status"],
             "count": len(review["entries"]), "edited": sum(entry["edited"] for entry in review["entries"]),
+            "web_resaved": sum(entry.get("web_resaved", False) for entry in review["entries"]),
             "categories": dict(Counter(entry["category"] for entry in review["entries"])),
             "preview": review.get("preview"), "excluded": review["excluded"]}
 
@@ -250,6 +275,8 @@ def render_review(review, output):
                                + '</a> · ' + escape(part.get_content_type()) + ' · ' + str(len(payload)) + ' 字节</li>')
         attachment_html = '<p>附件（将按当前文件发送）：</p><ul>' + ''.join(attachments) + '</ul>' if attachments else ""
         changed = '<p class="changed">已采用邮箱中的人工修改版本</p>' if entry["edited"] else ""
+        if entry.get("web_resaved"):
+            changed += '<p class="changed">已核对网页重新保存后的草稿；收件地址、主题和正文与原模板稿一致。</p>'
         cards.append(f'<article id="mail-{index}"><small>' + escape(entry["creator_id"] + ' · ' + entry["category"])
                      + '</small><h2>' + str(index) + '. ' + escape(label) + '</h2>' + changed + headers
                      + '<p><b>主题：</b>' + escape(str(message["Subject"])) + '</p>' + plain + rendered + attachment_html + '</article>')

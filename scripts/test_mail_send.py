@@ -112,6 +112,66 @@ class SendTests(unittest.TestCase):
         self.assertEqual(before, self.mailbox.client.data)
         self.assertEqual(self.state.db.execute('SELECT count(*) FROM send_attempts').fetchone()[0], 0)
 
+    def web_resave(self, *, changed_body=None):
+        message = s.parse(self.mailbox.client.data[b'Drafts'].pop(b'1'))
+        del message['X-Tailki-Draft-ID']
+        del message['X-Tailki-Batch-ID']
+        message.replace_header('Message-ID', '<sim-provider-draft.>')
+        message.replace_header('From', 'Webmail name <sara@example.invalid>')
+        message.replace_header('To', 'sim1 <sim1@example.invalid>')
+        message['Reply-To'] = 'Webmail name <sara@example.invalid>'
+        if changed_body is not None:
+            message.set_content(changed_body)
+        self.mailbox.client.data[b'Drafts'][b'99'] = message.as_bytes()
+
+    def test_webmail_resave_is_recovered_only_when_unique_and_complete_original_text_matches(self):
+        self.web_resave()
+        before = deepcopy(self.mailbox.client.data)
+        review = self.review()
+        entry = review['entries'][0]
+        self.assertEqual(entry['uid'], '99')
+        self.assertTrue(entry['web_resaved'])
+        self.assertIn('Webmail name', self.preview.read_text())
+        self.assertEqual(before, self.mailbox.client.data)
+        raw, _ = s.outgoing(entry, review, 'sim-send', m.now())
+        self.assertFalse(s.parse(raw)['Message-ID'].defects)
+        self.assertTrue(self.state.items(self.batch)[0]['web_relinks'])
+        self.approve(review)
+        self.assertEqual(self.send(review, self.transport())['states'], {'sent_verified': 2})
+
+    def test_replaced_identity_with_changed_or_ambiguous_body_is_never_silently_relinked(self):
+        self.web_resave(changed_body='Human edit without stable identity')
+        before = deepcopy(self.mailbox.client.data)
+        with self.assertRaises(m.DraftError): self.review()
+        self.assertEqual(before, self.mailbox.client.data)
+        self.assertNotIn('web_relinks', self.state.items(self.batch)[0])
+        message = s.parse(self.mailbox.client.data[b'Drafts'][b'99'])
+        message.set_content(self.state.items(self.batch)[0]['body'])
+        self.mailbox.client.data[b'Drafts'][b'99'] = message.as_bytes()
+        self.mailbox.client.data[b'Drafts'][b'100'] = message.as_bytes()
+        with self.assertRaises(m.DraftError): self.review()
+        self.assertNotIn('web_relinks', self.state.items(self.batch)[0])
+
+    def test_web_resave_after_approval_requires_fresh_review_before_any_submission(self):
+        review = self.review()
+        self.approve(review)
+        self.web_resave()
+        transport = self.transport()
+        with self.assertRaises(m.DraftError): self.send(review, transport)
+        self.assertEqual(transport.submissions, [])
+        fresh = self.review()
+        self.assertNotEqual(review['id'], fresh['id'])
+        self.assertNotIn('approval', fresh)
+
+    def test_provider_message_id_tolerance_does_not_allow_bad_addresses_or_duplicate_ids(self):
+        raw = self.mailbox.client.data[b'Drafts'][b'1']
+        for header, value in (('To', 'not-an-email'), ('From', 'not-an-email')):
+            message = s.parse(raw)
+            message.replace_header(header, value)
+            with self.assertRaises(m.DraftError): s.parse(message.as_bytes())
+        raw = raw.replace(b'Message-ID:', b'Message-ID: <other@example.invalid>\r\nMessage-ID:', 1)
+        with self.assertRaises(m.DraftError): s.parse(raw)
+
     def test_review_escapes_hostile_headers_and_isolates_html_and_links(self):
         self.edit(subject='<script>alert(1)</script>', html='<p>Visible final HTML</p><script>alert(2)</script><img src="https://example.invalid/track">')
         self.review()
