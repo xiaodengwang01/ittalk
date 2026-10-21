@@ -45,6 +45,8 @@ def verified_message(state, sender, review, entry, mailbox):
              "in_reply_to": str(message.get("In-Reply-To", "")), "references": str(message.get("References", "")),
              "review_id": review["id"], "draft_id": entry["draft_id"], "verification": "sent_folder"}
     records.put(state, event)
+    import candidate_pool
+    candidate_pool.mark_sent(state, entry["creator_id"], event)
     return event
 
 

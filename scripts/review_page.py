@@ -51,13 +51,13 @@ def render_page(snapshot, document):
     cards = snapshot["cards"]
     draft_count = len(snapshot["mails"]) + sum(bool(c["draft"]) for c in cards)
     mentors = [c for c in cards if c["kind"] == "mentor"]
-    nav = '<nav><a href="#decisions">带教待决</a><a href="#mails">邮件完整预览</a><a href="#creators">今日新增</a><a href="#issues">待核实</a></nav>'
+    nav = '<nav><a href="#decisions">带教待决</a><a href="#mails">邮件完整预览</a><a href="#pool">候选池</a><a href="#creators">今日新增</a><a href="#issues">待核实</a></nav>'
     chunks = []
     chunks.append('<header><div class="eyebrow">TAILKI · ' + text(snapshot["date"]) + '</div><h1>今日审核</h1><p class="muted">集中查看合作进展与完整邮件，在聊天中确认最终发送版本。</p><div class="actions"><a class="primary" href="' + escape(Path(document).as_uri(), quote=True) + '">查看带教 DOCX</a><a class="secondary" href="' + escape(Path(snapshot["book"]).as_uri(), quote=True) + '">打开跟进表</a></div></header>')
     chunks.append('<div class="metrics">' + ''.join('<div><strong>' + str(n) + '</strong><span>' + label + '</span></div>' for n, label in
                   ((len(snapshot["added"]), "今日新增"), (len(mentors), "带教待决"), (draft_count, "邮件待审"), (snapshot["sent_today"], "今日已核验发送"))) + '</div>')
     active = snapshot["schedule"].get("status") == "active"
-    chunks.append('<p class="notice">' + ("每日准备已开启 · 北京时间 10:00" if active else "每日定时准备未启用") + '。每批邮件均需你确认，查看或复制审核意见不会发送邮件。</p>')
+    chunks.append('<p class="notice">' + ("每日准备已开启 · 北京时间 10:00" if active else "每日定时准备未启用") + ' · 每天最多 ' + str(snapshot.get('daily_limit', 5)) + ' 位。每批邮件均需你确认，查看或复制审核意见不会发送邮件。</p>')
     chunks.append(nav)
     chunks.append('<section id="decisions"><h2>带教待决与来信进展</h2>')
     if not cards: chunks.append('<p class="empty">暂无已整理的待处理来信。</p>')
@@ -88,6 +88,15 @@ def render_page(snapshot, document):
                 chunks.append('<p class="warning">缓存记录包含附件，需先读取邮箱完整最终稿，本页尚不构成完整附件预览。</p>')
             chunks.append('<pre>' + text(item["body"]) + '</pre>')
         chunks.append('<p class="muted">批次：' + text(item["review_id"]) + '</p></article>')
+    pool = snapshot.get('candidate_pool', {})
+    chunks.append('</section><section id="pool"><h2>KOL 候选池</h2><p>池内共 ' + str(pool.get('total', 0)) + ' 位；其中 ' + str(pool.get('available_today', 0)) + ' 位今日资料齐全、待联系历史复核。每天最多入选 ' + str(pool.get('limit', 5)) + ' 位，未入选的继续保留。</p>')
+    if pool.get('items'):
+        chunks.append('<details><summary>查看候选名单和处理原因</summary><div class="tablewrap"><table><thead><tr><th>达人</th><th>合作邮箱</th><th>状态</th><th>核实日期</th><th>处理说明</th></tr></thead><tbody>')
+        for item in pool['items']:
+            chunks.append('<tr>' + ''.join('<td>' + text(value) + '</td>' for value in (item['name'], item['email'], item['label'], item['checked_at'][:10], item['reason'])) + '</tr>')
+        chunks.append('</tbody></table></div></details>')
+    else:
+        chunks.append('<p class="empty">候选池尚待补充。后续搜集结果会先入池、复核并去重，合格不足时如实列出缺口。</p>')
     chunks.append('</section><section id="creators"><h2>今日新增达人</h2>')
     if not snapshot["added"]: chunks.append('<p class="empty">今天尚无已登记的新增达人；历史待审事项继续保留。</p>')
     else:

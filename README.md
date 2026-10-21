@@ -1,6 +1,6 @@
 # Tailki
 
-本机 KOL 搜集、邮件审核和跟进流程。每日准备任务已按用户指令设为北京时间 10:00，包括周末；每天最多新增 8 位合格达人，不补跑旧日期。每批真实邮件仍需展示全部最终稿并取得对应版本的明确确认。
+本机 KOL 搜集、邮件审核和跟进流程。每日准备任务已按用户指令设为北京时间 10:00，包括周末；每天最多新增 5 位合格达人，不补跑旧日期。每批真实邮件仍需展示全部最终稿并取得对应版本的明确确认。
 
 ## 日常资料与事实记录
 
@@ -18,6 +18,22 @@
 
 ## 每日操作
 
+每天先从候选池挑选并实际复核，入选上限已改为 **5 位**（含补充批次）。旧日期已经完成的批次不重写、不删除。候选池与邮件状态使用同一个本机数据库，不增加工作表或重复名单。
+
+```bash
+python3 scripts/candidate_pool.py research --limit 10
+python3 scripts/candidate_pool.py ingest /本机/当天核实结果.json
+python3 scripts/candidate_pool.py select YYYY-MM-DD
+```
+
+`research` 返回有限数量的待核实线索和原来源、样本、判断理由。必须重新访问相应公开页面核实，不能只把旧资料日期改成今天。已按内容和受众匹配、近期播放和活跃度实际评估，再以低粉高播放和类似产品经验作加分；不以粉丝或销量单一排序。
+
+`ingest` 的格式为 `{"checked_at":"含时区的实际核对时间","routes_checked":["FastMoss","TikTok"],"creators":[...]}`，达人字段沿用维护说明。缺资料和旧线索可先留池，未达标的保留原因；旧输入不能冒充当天搜索。相同规范账号去重，不同账号共用邮箱时分别保留、暂停入选。已联系的账号、当前和历史邮箱均用于抑制重复首联。每次更新保留旧观察，已入选的资料不被新抓取静默替换。
+
+`select` 在实际邮箱核对收件、已发送和草稿；只有当天资料完整且合格的候选才进入原主表。按既有标准排序并选最多 5 位，剩余候选留池。不足 5 位如实报告缺口，不降低标准。随后按三类模板生成本批每封收件人、主题及完整正文，并刷新统一审核入口。没有任何发送调用；每批仍等用户确认。
+
+`daily_workflow.py pool-status/pool-ingest/select-pool` 提供相同入口。旧 `add 日期 输入.json` 命令也经候选池及真实邮箱核对，不绕过候选记录和人数上限；输入同样需要当天的 `checked_at`。`prepare` 仍可恢复已有批次，已冻结的名单不因剩余候选变化而追加；补充批次须另有当天明确指令，合计仍最多 5 位。
+
 双击 `scripts/今日审核.command`，会重新整理并打开唯一的“今日审核”页面，同时生成当天带教 DOCX。页面集中展示今日新增、带教待决、全部待审邮件和异常；页面中的“查看带教 DOCX”可直接打开文档，“审核意见”可复制后发回聊天。入口本身不收信、不发送、不批准邮件，也不改 Excel。
 
 实际仓库目录为 `/Users/ludwig/Desktop/Tailki`。命令使用 Python 3.9+；表格读写使用 Codex 提供的 Node 与 Artifact Tool。详细筛选与授权规则见 `docs/daily-maintenance.md`。
@@ -25,7 +41,7 @@
 1. `python3 scripts/daily_workflow.py status` 查看定时准备、当天进度和待处理来信。
 2. `python3 scripts/daily_workflow.py audit-history` 只读核对收件、已发送、草稿的必要邮件头，不读取已读正文或修改标记。
 3. `python3 scripts/daily_workflow.py begin YYYY-MM-DD` 复用北京时间当天批次。新准备任务不需要把历史待确认稿发完；未决项仍保留，逐位实时查重。
-4. 在已登录的内置浏览器搜集候选，使用 `add 日期 本机输入.json`、`prepare 日期` 入表并生成全部首联预览。缺项或未核实不凑数。
+4. 在已登录的内置浏览器核实候选，先 `candidate_pool.py ingest` 留池，再 `select 日期` 实时查重、入表并生成全部首联预览。缺项或未核实不凑数。
 5. `python3 scripts/mail_inbox.py` 只采集收件箱未读正文，保留未读标记。按策略文档形成摘要后，使用 `daily_workflow.py summarize 本机摘要.json` 入队；默认不承诺商务条件或发送回复。
 6. `python3 scripts/daily_workflow.py review` 汇总更新统一审核页面及当天带教文档。`prepare/summarize/record-sent` 和发送收尾命令也会自动刷新；生成失败不改变已完成的业务结果，重新打开入口恢复。
 
@@ -40,7 +56,7 @@
 `daily_workflow.py sync-records` 将已经合法采集的本机来信、摘要和指定联系人历史邮件头统一关联，不连接邮箱、不改表、不补扫已读正文。
 `daily_workflow.py context 达人ID` 查看该达人的本机已记录单封往来及计数。计数注明覆盖范围，不能把未采集的历史当成不存在。
 
-只执行当天时，仍可用 `start-today 日期 核对.json`；补足当天缺口用 `start-supplement 日期 核对.json`。二者不会替换旧确认或重发旧批次，当天人数合计最多 8。
+只执行当天时，仍可用 `start-today 日期 核对.json`；补足当天缺口用 `start-supplement 日期 核对.json`。二者不会替换旧确认或重发旧批次，当天人数合计最多 5。
 
 ## 邮箱草稿与完整确认
 
@@ -80,7 +96,7 @@ SMTP 操作入口为 `python3 scripts/mail_send.py`：
 ## 检查与上传
 
 ```bash
-python3 -B -m unittest scripts.test_review_center scripts.test_daily_workflow scripts.test_mail_postprocess scripts.test_mail_send scripts.test_mail_inbox scripts.test_mail_drafts scripts.test_mail_text scripts.test_workflow_rules scripts.test_workflow_adapter -q
+python3 -B -m unittest scripts.test_candidate_pool scripts.test_review_center scripts.test_daily_workflow scripts.test_mail_postprocess scripts.test_mail_send scripts.test_mail_inbox scripts.test_mail_drafts scripts.test_mail_text scripts.test_workflow_rules scripts.test_workflow_adapter -q
 ```
 
 检查使用模拟联系人及 `.invalid` 邮箱，不连接真实 SMTP。真实名单、邮件、凭据、预览、备份和运行记录不上传。

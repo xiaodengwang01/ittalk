@@ -268,7 +268,7 @@ class DailyTests(unittest.TestCase):
         d.approve_batch(self.state, first["batch"], instruction)
         d.claim_send(self.state, first["batch"])
         extra, paths = self.manual_evidence()
-        extra["user_instruction"] = "模拟：继续搜集今天剩下五位，仅准备完整预览"
+        extra["user_instruction"] = "模拟：继续搜集今天剩下两位，仅准备完整预览"
         with self.assertRaises(d.mail.DraftError):
             d.start_supplement(self.state, "2026-10-22", extra, **paths)
         receipts = {item["id"]: {"result": "success", "verification": "sent_folder",
@@ -278,17 +278,17 @@ class DailyTests(unittest.TestCase):
         d.record_sent(self.state, first["batch"], receipts, self.book)
         frozen = self.state.items(first["batch"])
         extra, paths = self.manual_evidence()
-        extra["user_instruction"] = "模拟：继续搜集今天剩下五位，仅准备完整预览"
+        extra["user_instruction"] = "模拟：继续搜集今天剩下两位，仅准备完整预览"
         extra["sent_contacts"] = [{"email": "sim10@example.invalid"}]
         value = d.start_supplement(self.state, "2026-10-22", extra, **paths)
         self.assertEqual(value["round_start"], 3)
         self.assertEqual(value["batch"], "tailki-20261022-part2")
         self.assertEqual(d.prepare_day(self.state, "2026-10-22", self.book, self.template)["batch"], None)
         self.add([candidate(n) for n in range(5, 11)])
-        self.assertEqual(len(d.start_supplement(self.state, "2026-10-22", extra, **paths)["creators"]), 8)
+        self.assertEqual(len(d.start_supplement(self.state, "2026-10-22", extra, **paths)["creators"]), 5)
         second = d.prepare_day(self.state, "2026-10-22", self.book, self.template)
         self.assertEqual(second["shortfall"], 0)
-        self.assertEqual(len(self.state.items(second["batch"])), 5)
+        self.assertEqual(len(self.state.items(second["batch"])), 2)
         self.assertEqual(self.state.items(first["batch"]), frozen)
         self.assertIsNone(d.get(self.state, "approval:" + second["batch"]))
         self.assertIsNone(d.get(self.state, "activation"))
@@ -303,7 +303,7 @@ class DailyTests(unittest.TestCase):
             original = {n: z.read(n) for n in z.namelist()}
         result = self.add()
         self.assertEqual(len(result["added"]), 1)
-        self.assertEqual(result["shortfall"], 7)
+        self.assertEqual(result["shortfall"], 4)
         sheet = d.workbook.read(self.book)
         self.assertEqual(sheet["creators"][-1]["_row"], 3)
         self.assertEqual(sheet["creators"][-1]["联系状态"], "待首联确认")
@@ -337,16 +337,16 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(saved, self.book.read_bytes())
         self.assertEqual(len(value["creators"]), 1)
 
-    def test_quality_gaps_and_eight_limit(self):
+    def test_quality_gaps_and_five_limit(self):
         self.active()
         people = [candidate(i) for i in range(2, 12)]
         people[0]["Email"] = ""
         people[1]["内容判断"] = ""
         result = self.add(people)
-        self.assertEqual(len(result["added"]), 8)
+        self.assertEqual(len(result["added"]), 5)
         self.assertEqual(len(result["rejected"]), 2)
-        self.assertEqual(len(d.workbook.read(self.book)["creators"]), 9)
-        self.assertEqual(len(self.add([candidate(20)])["added"]), 8)
+        self.assertEqual(len(d.workbook.read(self.book)["creators"]), 6)
+        self.assertEqual(len(self.add([candidate(20)])["added"]), 5)
 
     def test_preview_is_idempotent_and_send_receipt_is_required(self):
         self.active()

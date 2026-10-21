@@ -95,6 +95,16 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(body, Path(two['document']).read_bytes())
         self.assertEqual(self.state.db.execute('SELECT count(*) FROM send_reviews').fetchone()[0], 0)
 
+    def test_pool_only_changes_refresh_page_without_reexporting_mentor_document(self):
+        import candidate_pool
+        center.adopt_document(self.state,self.report(),self.book)
+        first=self.build();document=Path(first['document']).read_bytes()
+        candidate_pool.ingest(self.state,{'creators':[{'账号链接':'https://tiktok.com/@sim_pool'}]},self.book)
+        second=self.build()
+        self.assertNotEqual(first['model_hash'],second['model_hash'])
+        self.assertEqual(document,Path(second['document']).read_bytes())
+        self.assertIn('@sim_pool',Path(second['page']).read_text())
+
     def test_generated_doc_manual_changes_are_adopted_before_refresh(self):
         center.adopt_document(self.state, self.report(), self.book)
         one = self.build()

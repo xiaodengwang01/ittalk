@@ -276,12 +276,15 @@ def model(state, day, book=daily.BOOK):
                       "review_id": item["batch_id"], "hash": item["content_hash"], "kind": "prepared",
                       "label": "待核对邮箱最终稿" if current else "本机首联初稿，待确认", "read_at": item.get("updated_at", "")})
     generated_at = mail.now()
+    import candidate_pool
     result = {"date": day, "generated_at": generated_at, "book": str(Path(book).resolve()),
               "book_hash": mail.digest(Path(book).read_bytes()), "added": added, "cards": cards, "mails": mails,
               "warnings": warnings, "schedule": daily.get(state, "activation", {}),
+              "candidate_pool": candidate_pool.summary(state, day), "daily_limit": daily.DAILY_TARGET,
               "verified_total": sum(a["status"] == "sent_verified" for a in attempts.values()),
               "sent_today": sum(a["status"] == "sent_verified" and a.get("receipt", {}).get("sent_at", "")[:10] == day for a in attempts.values())}
     result["hash"] = mail.digest({k: v for k, v in result.items() if k != "generated_at"})
+    result["document_model_hash"] = mail.digest({k: result[k] for k in ("date", "added", "cards", "warnings")})
     return result
 
 
@@ -310,7 +313,11 @@ def build(state, day=None, book=daily.BOOK, output=None):
     original_document_hash = mail.digest(document.read_bytes()) if document.exists() else None
     from review_docx import write_document
     from review_page import render_page
-    if not previous or previous.get("model_hash") != snapshot["hash"] or not document.exists():
+    old_document_model = previous.get("document_model_hash")
+    if old_document_model is None and previous.get("model_hash") == mail.digest({k: v for k, v in snapshot.items()
+            if k not in {"generated_at", "hash", "document_model_hash", "candidate_pool", "daily_limit"}}):
+        old_document_model = snapshot["document_model_hash"]
+    if not previous or old_document_model != snapshot["document_model_hash"] or not document.exists():
         with tempfile.TemporaryDirectory(prefix="tailki-report-") as temp:
             temporary = Path(temp) / "report.docx"
             write_document(snapshot, temporary)
@@ -325,6 +332,7 @@ def build(state, day=None, book=daily.BOOK, output=None):
     atomic_bytes(output, page.encode("utf-8"))
     manifest = {"date": day, "page": str(output), "document": str(document), "document_hash": doc_hash,
                 "model_hash": snapshot["hash"], "generated_at": snapshot["generated_at"],
+                "document_model_hash": snapshot["document_model_hash"],
                 "counts": {"added": len(snapshot["added"]), "mentor": sum(c["kind"] == "mentor" for c in snapshot["cards"]),
                            "drafts": len(snapshot["mails"]) + sum(bool(c["draft"]) for c in snapshot["cards"])},
                 "warnings": snapshot["warnings"], "sent": False, "book_changed": False}

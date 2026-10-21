@@ -24,7 +24,7 @@ BOOK = BUSINESS / "达人跟进表.xlsx"
 TEMPLATE = BUSINESS / "Tailki_KOL初次建联邮件_三个版本.docx"
 STRATEGY = BUSINESS / "Tailki_KOL回复策略-第二版.docx"
 REFERENCE = BUSINESS / "Tailki_KOL达人回复参考.docx"
-DAILY_TARGET = 8
+DAILY_TARGET = 5
 RUN_HOUR = 10
 RESEARCH_COLUMNS = {"达人ID", "达人昵称", "Email", "首联内容分类", "账号链接", "宠物类型", "内容类型",
                     "粉丝数", "近10条最高播放", "近10条中位播放", "内容能力(1-5)", "宠物人群匹配度(1-5)",
@@ -492,7 +492,7 @@ def add_candidates(state, day, data, book=BOOK):
     candidates.sort(key=lambda c: (c["内容能力(1-5)"], c["宠物人群匹配度(1-5)"],
                                    c["播放能力(1-5)"], c.get("是否低粉高播放") == "是",
                                    c.get("是否带货类似产品") == "是"), reverse=True)
-    remaining = DAILY_TARGET - len(value["creators"])
+    remaining = max(0, DAILY_TARGET - len(value["creators"]))
     if value["prepared"] and candidates and remaining:
         raise mail.DraftError("当天批次已生成预览，不能静默更改名单；保留已准备的批次。")
     for candidate in candidates[:remaining]:
@@ -503,7 +503,7 @@ def add_candidates(state, day, data, book=BOOK):
     value["routes"] = data["routes_checked"]
     put(state, "day:" + day, value)
     recover_reserved(state, value, book)
-    return {"date": day, "added": value["creators"], "shortfall": DAILY_TARGET-len(value["creators"]),
+    return {"date": day, "added": value["creators"], "shortfall": max(0, DAILY_TARGET-len(value["creators"])),
             "rejected": rejected}
 
 
@@ -512,18 +512,20 @@ def prepare_day(state, day, book=BOOK, template=TEMPLATE):
     recover_reserved(state, value, book)
     creators = value["creators"][value.get("round_start", 0):]
     if not creators:
-        return {"batch": None, "shortfall": DAILY_TARGET-len(value["creators"])}
+        return {"batch": None, "shortfall": max(0, DAILY_TARGET-len(value["creators"]))}
     exists = state.db.execute("SELECT 1 FROM batches WHERE id=?", (value["batch"],)).fetchone()
     if exists:
         result = mail.report(state, value["batch"])
     else:
+        if len(creators) > DAILY_TARGET:
+            raise mail.DraftError("既有未冻结名单超过当前每日 5 位上限，保留记录，请先核实；未新增草稿。")
         result = mail.prepare(state, book, template, creators, batch_id=value["batch"],
                               expected_count=len(creators))
     value["prepared"] = True
     put(state, "day:" + day, value)
     return {**result, "preview": mail.render_preview(state, value["batch"]),
             "content_hashes": {i["id"]: i["content_hash"] for i in state.items(value["batch"])},
-            "shortfall": DAILY_TARGET-len(value["creators"])}
+            "shortfall": max(0, DAILY_TARGET-len(value["creators"]))}
 
 
 def summarize_replies(state, messages):
@@ -646,6 +648,8 @@ def record_sent(state, batch, receipts, book=BOOK):
     for item, receipt in accepted:
         put(state, "receipt:" + item["id"], receipt)
         mail.State.update(state, item, status="sent_verified", sent_receipt=receipt)
+        import candidate_pool
+        candidate_pool.mark_sent(state, item["creator_id"], receipt)
     return {"recorded": [i["creator_id"] for i, _ in accepted], "sent_by_this_command": False}
 
 
@@ -662,6 +666,9 @@ def main():
     sub.add_parser("audit-history")
     sub.add_parser("sync-records")
     sub.add_parser("review")
+    sub.add_parser("pool-status")
+    sub.add_parser("pool-ingest").add_argument("input", type=Path)
+    sub.add_parser("select-pool").add_argument("day")
     sub.add_parser("context").add_argument("creator_id")
     for cmd in ("begin", "prepare"):
         sub.add_parser(cmd).add_argument("day")
@@ -685,8 +692,16 @@ def main():
         initialize(state)
         data = json.loads(args.input.read_text()) if hasattr(args, "input") else None
         if args.command == "status":
+            import candidate_pool
             result = {"activation": get(state, "activation", {"status": "paused"}),
-                      "days": all_items(state, "day:"), "pending_replies": pending_replies(state)}
+                      "days": all_items(state, "day:"), "pending_replies": pending_replies(state),
+                      "candidate_pool": candidate_pool.summary(state)}
+        elif args.command == "pool-status":
+            import candidate_pool
+            result = candidate_pool.summary(state)
+        elif args.command == "pool-ingest":
+            import candidate_pool
+            result = candidate_pool.ingest(state, data, args.book)
         elif args.command == "preflight":
             result = preflight(state, book=args.book)
         elif args.command == "activate":
@@ -714,8 +729,15 @@ def main():
             result = start_today(state, args.day, data, book=args.book)
         elif args.command == "start-supplement":
             result = start_supplement(state, args.day, data, book=args.book)
-        elif args.command == "add":
-            result = add_candidates(state, args.day, data, book=args.book)
+        elif args.command in ("add", "select-pool"):
+            import candidate_pool
+            if args.command == "add": candidate_pool.ingest(state, data, args.book)
+            mailbox = mail.connect(state.config())
+            try:
+                audit_history(state, mailbox)
+                result = candidate_pool.select_day(state, args.day, mailbox, args.book)
+            finally:
+                mailbox.close()
         elif args.command == "prepare":
             result = prepare_day(state, args.day, book=args.book)
         elif args.command == "summarize":
@@ -726,7 +748,7 @@ def main():
             result = claim_send(state, args.batch)
         elif args.command == "record-sent":
             result = record_sent(state, args.batch, data, book=args.book)
-        if args.command in ("prepare", "summarize", "record-sent"):
+        if args.command in ("prepare", "summarize", "record-sent", "pool-ingest", "select-pool", "add"):
             import review_center
             result["review_center"] = review_center.refresh_after_operation(state, result, book=args.book)
         print(json.dumps(result, ensure_ascii=False, indent=2))
