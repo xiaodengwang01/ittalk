@@ -454,6 +454,7 @@ class Mailbox:
         config = config or {}
         self.account = account
         self.client = None
+        self._header_cache = {}
         try:
             self.client = (factory or imaplib.IMAP4_SSL)(
                 "imap.qiye.aliyun.com", 993, ssl_context=ssl.create_default_context(), timeout=30)
@@ -500,23 +501,35 @@ class Mailbox:
         return list(dict.fromkeys(b" ".join(x for x in values if x).split()))
 
     def fetch(self, uid, *, headers=False):
-        part = "(BODY.PEEK[HEADER])" if headers else "(BODY.PEEK[])"
+        part = "(UID BODY.PEEK[HEADER.FIELDS (FROM TO CC MESSAGE-ID X-Tailki-Draft-ID)])" if headers else "(BODY.PEEK[])"
         code, values = self.client.uid("FETCH", uid, part)
         chunks = [x[1] for x in (values or []) if isinstance(x, tuple) and isinstance(x[1], bytes)]
         if code != "OK" or len(chunks) != 1:
             raise DraftError("无法完整读回邮件，未继续上传。")
         return chunks[0]
 
+    def header_index(self, folder, *, refresh=False):
+        # Alibaba Mail supports ALL/UID retrieval but rejects address and
+        # arbitrary HEADER search criteria. Match only minimal headers locally.
+        validity = self.select(folder)
+        live = self.search("ALL")
+        key = (folder, validity)
+        cached = {} if refresh else self._header_cache.get(key, {})
+        headers = {}
+        for uid in live:
+            headers[uid] = cached.get(uid)
+            if headers[uid] is None:
+                headers[uid] = BytesParser(policy=policy.default).parsebytes(self.fetch(uid, headers=True))
+        # UIDVALIDITY changes invalidate every old association in this folder.
+        self._header_cache = {k: v for k, v in self._header_cache.items() if k[0] != folder}
+        self._header_cache[key] = headers
+        return validity, headers
+
     def history(self, recipient):
         found = []
         for name, folder in (("收件箱", b"INBOX"), ("已发送", self.sent["raw"])):
-            self.select(folder)
-            uids = set()
-            for field in ("FROM", "TO", "CC"):
-                uids.update(self.search(field, self.quoted(recipient)))
-            for uid in sorted(uids):
-                raw = self.fetch(uid, headers=True)
-                message = BytesParser(policy=policy.default).parsebytes(raw)
+            _, headers = self.header_index(folder)
+            for uid, message in headers.items():
                 addresses = {address.lower() for _, address in getaddresses(
                     message.get_all("From", []) + message.get_all("To", []) + message.get_all("Cc", []))}
                 if recipient.lower() in addresses:
@@ -525,20 +538,17 @@ class Mailbox:
 
     def find(self, item, *, sent=False):
         folder = self.sent if sent else self.drafts
-        validity = self.select(folder["raw"])
+        validity, headers = self.header_index(folder["raw"], refresh=not sent)
         uids = set()
-        for header, value in (("X-Tailki-Draft-ID", item["id"]), ("Message-ID", item.get("message_id", ""))):
-            if not value:
-                continue
-            for uid in self.search("HEADER", header, self.quoted(value)):
-                raw = self.fetch(uid, headers=True)
-                message = BytesParser(policy=policy.default).parsebytes(raw)
-                if str(message.get(header, "")).strip() == value:
+        for uid, message in headers.items():
+            for header, value in (("X-Tailki-Draft-ID", item["id"]), ("Message-ID", item.get("message_id", ""))):
+                if value and str(message.get(header, "")).strip() == value:
                     uids.add(uid)
         # A web edit may retain its UID while changing Message-ID or custom headers.
         if not sent and not uids and item.get("uidvalidity") == validity and item.get("uid"):
-            candidates = self.search("UID", item["uid"])
-            uids.update(candidates)
+            uid = item["uid"].encode("ascii")
+            if uid in headers:
+                uids.add(uid)
         results = []
         for uid in sorted(uids):
             results.append({"uid": uid.decode("ascii"), "uidvalidity": validity,
@@ -546,10 +556,9 @@ class Mailbox:
         return results
 
     def existing_drafts(self, recipient):
-        self.select(self.drafts["raw"])
+        _, headers = self.header_index(self.drafts["raw"], refresh=True)
         found = []
-        for uid in self.search("TO", self.quoted(recipient)):
-            message = BytesParser(policy=policy.default).parsebytes(self.fetch(uid, headers=True))
+        for uid, message in headers.items():
             addresses = {address.lower() for _, address in getaddresses(message.get_all("To", []))}
             if recipient.lower() in addresses:
                 found.append(uid.decode("ascii"))

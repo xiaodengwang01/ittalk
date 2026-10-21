@@ -32,6 +32,8 @@
 
 管理员需允许该账号使用第三方客户端及 IMAP 服务，员工在网页端“设置 → 账户与安全 → 账户安全”生成专用安全密码。连接地址为 `imap.qiye.aliyun.com:993`，强制校验证书。参见[官方配置](https://help.aliyun.com/zh/document_detail/36576.html)和[安全密码设置](https://help.aliyun.com/zh/document_detail/444269.html)。
 
+阿里邮箱不支持部分地址和任意邮件头搜索条件。程序使用 `UID SEARCH ALL` 取得稳定标识，只读取 From/To/Cc、Message-ID 和本批草稿标识等必要邮件头，在本机精确匹配所选联系人；不下载其他邮件正文。收件箱和已发送的邮件头索引仅保存在当前连接内存，按 UIDVALIDITY 和实时 UID 列表更新；草稿箱每次重新核对邮件头以保留网页编辑。所有读取使用 EXAMINE 与 BODY.PEEK，不设置已读、删除或其他标记。参见[阿里官方检索限制](https://help.aliyun.com/zh/document_detail/2857995.html)。
+
 在邮箱草稿箱逐封审核和修改后，回到对话明确确认具体批次。SMTP 发送不在当前入口中，后续须读取最终稿、展示完整内容并单独取得批次发送确认；准备草稿或保存凭据不构成发送授权。
 
 模拟检查：`python3 -m unittest scripts.test_mail_drafts -v`。测试只用 `SIM-` 编号和 `.invalid` 邮箱，覆盖分类、占位符、名单筛选、历史核对、重复运行、上传中断、网页编辑、删除和人工发送后的保护。

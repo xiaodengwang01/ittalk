@@ -462,6 +462,79 @@ class FakeIMAP:
 
 
 class ProtocolTests(unittest.TestCase):
+    def reply(self, sender="sim-001@example.invalid"):
+        message = m.EmailMessage()
+        message["From"] = sender
+        message["To"] = "sara@example.invalid"
+        message.set_content("Only the selected draft body may be fetched in full.")
+        return message.as_bytes()
+
+    def test_provider_without_address_or_header_search_uses_only_all_and_minimal_headers(self):
+        class Limited(FakeIMAP):
+            def uid(self, operation, *arguments):
+                if operation == "SEARCH" and arguments[1:] != ("ALL",):
+                    raise m.imaplib.IMAP4.error("invalid command or parameters")
+                if operation == "FETCH" and "HEADER" in arguments[1]:
+                    assert "HEADER.FIELDS (FROM TO CC MESSAGE-ID X-Tailki-Draft-ID)" in arguments[1]
+                return super().uid(operation, *arguments)
+        mailbox = m.Mailbox("sara@example.invalid", "simulated-private-value", factory=Limited)
+        mailbox.client.data[b"INBOX"][b"1"] = self.reply()
+        mailbox.client.data[b"INBOX"][b"2"] = self.reply("unrelated@example.invalid")
+        self.assertEqual(len(mailbox.history("sim-001@example.invalid")), 1)
+        item = {"id": "sim-draft", "batch_id": "SIM-BATCH", "message_id": "<sim@example.invalid>",
+                "recipient": "sim-001@example.invalid", "subject": "Test", "body": "Complete simulated draft"}
+        mailbox.append(m.make_message(item, mailbox.account))
+        self.assertEqual(len(mailbox.existing_drafts(item["recipient"])), 1)
+        self.assertTrue(m.matches_original(item, mailbox.find(item)[0]["remote"]))
+        mailbox.close()
+
+    def test_header_index_adds_new_mail_drops_deleted_uids_and_resets_on_uidvalidity_change(self):
+        class Epoch(FakeIMAP):
+            validity = b"42"
+            def response(self, name):
+                return name, [self.validity]
+        mailbox = m.Mailbox("sara@example.invalid", "simulated-private-value", factory=Epoch)
+        inbox = mailbox.client.data[b"INBOX"]
+        inbox[b"1"] = self.reply()
+        self.assertEqual(len(mailbox.history("sim-001@example.invalid")), 1)
+        reads = mailbox.client.calls.count("FETCH")
+        mailbox.history("sim-001@example.invalid")
+        self.assertEqual(mailbox.client.calls.count("FETCH"), reads)
+        inbox[b"2"] = self.reply()
+        self.assertEqual(len(mailbox.history("sim-001@example.invalid")), 2)
+        del inbox[b"1"]
+        self.assertEqual(len(mailbox.history("sim-001@example.invalid")), 1)
+        inbox[b"2"] = self.reply("other@example.invalid")
+        mailbox.client.validity = b"43"
+        self.assertEqual(mailbox.history("sim-001@example.invalid"), [])
+        mailbox.close()
+
+    def test_draft_headers_are_refreshed_after_web_edits_even_when_uid_is_unchanged(self):
+        mailbox = m.Mailbox("sara@example.invalid", "simulated-private-value", factory=FakeIMAP)
+        item = {"id": "sim-draft", "batch_id": "SIM-BATCH", "message_id": "<sim@example.invalid>",
+                "recipient": "sim-001@example.invalid", "subject": "Test", "body": "Draft"}
+        mailbox.append(m.make_message(item, mailbox.account))
+        self.assertEqual(mailbox.existing_drafts(item["recipient"]), ["1"])
+        edited = dict(item, recipient="edited@example.invalid", subject="Human edited")
+        mailbox.client.data[b"Drafts"][b"1"] = m.make_message(edited, mailbox.account)
+        self.assertEqual(mailbox.existing_drafts(item["recipient"]), [])
+        self.assertEqual(mailbox.existing_drafts(edited["recipient"]), ["1"])
+        self.assertEqual(mailbox.find(item)[0]["remote"]["subject"], "Human edited")
+        mailbox.close()
+
+    def test_header_failure_stops_history_check_instead_of_claiming_no_contact(self):
+        class BrokenHeaders(FakeIMAP):
+            def uid(self, operation, *arguments):
+                if operation == "FETCH":
+                    return "NO", []
+                return super().uid(operation, *arguments)
+        mailbox = m.Mailbox("sara@example.invalid", "simulated-private-value", factory=BrokenHeaders)
+        mailbox.client.data[b"INBOX"][b"1"] = self.reply()
+        with self.assertRaises(m.DraftError):
+            mailbox.history("sim-001@example.invalid")
+        self.assertNotIn("APPEND", mailbox.client.calls)
+        mailbox.close()
+
     def test_login_failure_explains_configuration_without_echoing_server_data(self):
         class Rejected(FakeIMAP):
             def login(self, account, secret):
