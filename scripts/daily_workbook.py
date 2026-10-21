@@ -99,7 +99,7 @@ def patch_cells(path, cells, *, expected_hash, backup_dir, style_row, new_rows=(
                 raise mail.DraftError("生成单元格含计算错误，未修改原表。")
             changed.setdefault(number, []).append(cell)
         for number, edits in sorted(changed.items()):
-            pattern = rf'<row\b[^>]*\br="{number}"[^>]*(?:/>|>.*?</row>)'
+            pattern = rf'<row\b[^>]*\br="{number}"[^>]*?(?:/>|>.*?</row>)'
             match = re.search(pattern, raw, flags=re.S)
             if number in new_rows:
                 # Empty preformatted rows often have the default 15pt height.
@@ -125,7 +125,10 @@ def patch_cells(path, cells, *, expected_hash, backup_dir, style_row, new_rows=(
             for cell in edits:
                 address = cell.get("r")
                 xml = ET.tostring(cell, encoding="unicode")
-                cp = rf'<c\b[^>]*\br="{address}"[^>]*(?:/>|>.*?</c>)'
+                # Stop at a self-closing tag before considering a paired tag.
+                # A greedy prefix can consume its slash, then match through the
+                # next cell's closing tag and silently remove adjacent data.
+                cp = rf'<c\b[^>]*\br="{address}"[^>]*?(?:/>|>.*?</c>)'
                 if re.search(cp, row, flags=re.S):
                     row = re.sub(cp, lambda _: xml, row, count=1, flags=re.S)
                 else:

@@ -337,6 +337,55 @@ class DailyTests(unittest.TestCase):
                                    backup_dir=self.folder / "backups", style_row=2)
         self.assertEqual(before, self.book.read_bytes())
 
+    def test_filling_self_closing_cell_preserves_adjacent_email(self):
+        part = "xl/worksheets/sheet1.xml"
+        for ending in ("/>", " />"):
+            with self.subTest(ending=ending):
+                with ZipFile(self.base) as z:
+                    files = [(i, z.read(i.filename)) for i in z.infolist()]
+                raw = dict((i.filename, b) for i, b in files)[part].decode()
+                import re
+                raw = re.sub(r'<c\b[^>]*\br="D2"[^>]*?(?:/>|>.*?</c>)', "", raw)
+                raw = raw.replace('<c r="E2"', '<c r="D2" s="0"' + ending + '<c r="E2"', 1)
+                with ZipFile(self.book, "w") as z:
+                    for info, data in files:
+                        z.writestr(info, raw.encode() if info.filename == part else data)
+                before = ET.fromstring(raw)
+                old_email = ET.tostring(before.find('.//s:c[@r="E2"]', d.workbook.NS))
+                d.workbook.patch_cells(self.book, {"D2": {"value": "模拟最新回复摘要"}},
+                                       expected_hash=d.mail.digest(self.book.read_bytes()),
+                                       backup_dir=self.folder / "backups", style_row=2)
+                with ZipFile(self.book) as z:
+                    after = ET.fromstring(z.read(part))
+                    self.assertEqual(ET.tostring(after.find('.//s:c[@r="E2"]', d.workbook.NS)), old_email)
+                    for info, data in files:
+                        if info.filename != part:
+                            self.assertEqual(z.read(info.filename), data)
+                row = d.workbook.read(self.book)["creators"][0]
+                self.assertEqual(row["Email"], "sim1@example.invalid")
+                self.assertEqual(row["沟通摘要"], "模拟最新回复摘要")
+
+    def test_filling_self_closing_row_preserves_following_row(self):
+        part = "xl/worksheets/sheet1.xml"
+        with ZipFile(self.book) as z:
+            files = [(i, z.read(i.filename)) for i in z.infolist()]
+        raw = dict((i.filename, b) for i, b in files)[part].decode()
+        import re
+        raw = re.sub(r'<row\b[^>]*\br="3"[^>]*?(?:/>|>.*?</row>)', '<row r="3"/>', raw)
+        old_root = ET.fromstring(raw)
+        following = old_root.find('s:sheetData/s:row[@r="4"]', d.workbook.NS)
+        self.assertIsNotNone(following)
+        old_row = ET.tostring(following)
+        with ZipFile(self.book, "w") as z:
+            for info, data in files:
+                z.writestr(info, raw.encode() if info.filename == part else data)
+        d.workbook.patch_cells(self.book, {"D3": {"value": "模拟分组备注"}},
+                               expected_hash=d.mail.digest(self.book.read_bytes()),
+                               backup_dir=self.folder / "backups", style_row=2)
+        with ZipFile(self.book) as z:
+            after = ET.fromstring(z.read(part))
+        self.assertEqual(ET.tostring(after.find('s:sheetData/s:row[@r="4"]', d.workbook.NS)), old_row)
+
 
 if __name__ == "__main__":
     unittest.main()
