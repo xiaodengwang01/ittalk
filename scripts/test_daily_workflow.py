@@ -186,6 +186,46 @@ class DailyTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(d.mail.DraftError):
                 d.validate_candidate(invalid, "2026-10-22")
 
+    def test_explicit_supplement_preserves_sent_round_and_total_limit(self):
+        evidence, paths = self.manual_evidence()
+        d.start_today(self.state, "2026-10-22", evidence, **paths)
+        self.add([candidate(n) for n in (2, 3, 4)])
+        first = d.prepare_day(self.state, "2026-10-22", self.book, self.template)
+        old_items = self.state.items(first["batch"])
+        instruction = {"user_instruction": "模拟确认第一批", "user_instruction_at": NOW.isoformat(),
+                       "content_hashes": first["content_hashes"]}
+        d.approve_batch(self.state, first["batch"], instruction)
+        d.claim_send(self.state, first["batch"])
+        extra, paths = self.manual_evidence()
+        extra["user_instruction"] = "模拟：继续搜集今天剩下五位，仅准备完整预览"
+        with self.assertRaises(d.mail.DraftError):
+            d.start_supplement(self.state, "2026-10-22", extra, **paths)
+        receipts = {item["id"]: {"result": "success", "verification": "sent_folder",
+                    "message_id": "SIM-SENT-" + item["id"], "source": "https://example.invalid/sent/" + item["id"],
+                    "sent_at": NOW.isoformat(), "recipient": item["recipient"], "content_hash": item["content_hash"]}
+                    for item in old_items}
+        d.record_sent(self.state, first["batch"], receipts, self.book)
+        frozen = self.state.items(first["batch"])
+        extra, paths = self.manual_evidence()
+        extra["user_instruction"] = "模拟：继续搜集今天剩下五位，仅准备完整预览"
+        extra["sent_contacts"] = [{"email": "sim10@example.invalid"}]
+        value = d.start_supplement(self.state, "2026-10-22", extra, **paths)
+        self.assertEqual(value["round_start"], 3)
+        self.assertEqual(value["batch"], "tailki-20261022-part2")
+        self.assertEqual(d.prepare_day(self.state, "2026-10-22", self.book, self.template)["batch"], None)
+        self.add([candidate(n) for n in range(5, 11)])
+        self.assertEqual(len(d.start_supplement(self.state, "2026-10-22", extra, **paths)["creators"]), 8)
+        second = d.prepare_day(self.state, "2026-10-22", self.book, self.template)
+        self.assertEqual(second["shortfall"], 0)
+        self.assertEqual(len(self.state.items(second["batch"])), 5)
+        self.assertEqual(self.state.items(first["batch"]), frozen)
+        self.assertIsNone(d.get(self.state, "approval:" + second["batch"]))
+        self.assertIsNone(d.get(self.state, "activation"))
+        with self.assertRaises(d.mail.DraftError):
+            d.claim_send(self.state, second["batch"])
+        with self.assertRaises(d.mail.DraftError):
+            d.start_supplement(self.state, "2026-10-22", {**extra, "user_instruction": "模拟再次补充"}, **paths)
+
     def test_append_preserves_parts_literal_history_and_deduplicates(self):
         self.active()
         with ZipFile(self.book) as z:

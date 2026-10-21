@@ -183,6 +183,48 @@ def day_state(state, day):
     return value
 
 
+def start_supplement(state, day, evidence, **paths):
+    """A new instruction may fill today's gap after the prior round was sent."""
+    require_instruction(evidence)
+    value = day_state(state, day)
+    if timestamp(evidence["user_instruction_at"]).date().isoformat() != day:
+        raise mail.DraftError("补充搜集需要当天的最新明确指令。")
+    if (evidence.get("scope") != "prepare_only" or not evidence.get("account")
+            or evidence["account"].lower() != state.config().get("account", "").lower()
+            or evidence.get("history_folders") != ["INBOX", "Sent", "Drafts"]
+            or evidence.get("unresolved") != [] or not isinstance(evidence.get("sent_contacts"), list)):
+        raise mail.DraftError("补充批次的准备范围、账号或历史核对不完整。")
+    now, checked = current_time(), timestamp(evidence["checked_at"])
+    if checked.date() != now.date() or not timedelta(0) <= now - checked <= timedelta(hours=24):
+        raise mail.DraftError("补充批次需要当天实际邮箱历史核对。")
+    if value.get("supplement_authorization") == evidence:
+        return value
+    if not value["prepared"] or value["reserved"] or len(value["creators"]) >= DAILY_TARGET:
+        raise mail.DraftError("当前批次尚未完成准备，或当天已达人数上限，不能新建补充批次。")
+    items = state.items(value["batch"])
+    prior_ids = value["creators"][value.get("round_start", 0):]
+    if not items or {item["creator_id"] for item in items} != set(prior_ids):
+        raise mail.DraftError("当前批次与当天名单不一致，先核对历史。")
+    for item in items:
+        receipt = get(state, "receipt:" + item["id"])
+        if item["status"] != "sent_verified" or not isinstance(receipt, dict) or receipt != item.get("sent_receipt"):
+            raise mail.DraftError("上一批次仍有未核实发送，不能重置名单或确认。")
+        verify_receipt(item, receipt)
+    before = preflight(state, **paths)
+    for field in ("sources", "creator_ids", "draft_ids", "draft_snapshot"):
+        if evidence.get(field) != before[field]:
+            raise mail.DraftError("补充批次核对快照已变化：" + field)
+    rounds = value.setdefault("completed_rounds", [])
+    next_batch = "tailki-" + day.replace("-", "") + "-part" + str(len(rounds) + 2)
+    if state.db.execute("SELECT 1 FROM batches WHERE id=?", (next_batch,)).fetchone():
+        raise mail.DraftError("补充批次编号已有历史，停止覆盖。")
+    rounds.append({"batch": value["batch"], "creators": prior_ids, "completed_at": now.isoformat()})
+    value.update(batch=next_batch, round_start=len(value["creators"]), prepared=False,
+                 rejected=[], supplement_authorization=evidence)
+    put(state, "day:" + day, value)
+    return value
+
+
 def profile(value):
     value = workbook.workflow.rules.canonical_account_url("TikTok", value)
     if not re.fullmatch(r"https://tiktok\.com/@[a-z0-9._]+", value):
@@ -306,7 +348,8 @@ def add_candidates(state, day, data, book=BOOK):
     emails = {str(r.get("Email", "")).strip().lower() for r in sheet["creators"]}
     emails.update(x["recipient"].lower() for x in drafts_snapshot(state))
     # Activation audit includes contacts already sent to but absent from this workbook.
-    history = value.get("manual_authorization", get(state, "activation", {}).get("evidence", {})).get("sent_contacts", [])
+    history = value.get("supplement_authorization", value.get("manual_authorization",
+                        get(state, "activation", {}).get("evidence", {}))).get("sent_contacts", [])
     emails.update(x["email"].lower() for x in history if x.get("email"))
     accounts.update(profile(x["profile"]) for x in history if x.get("profile"))
     next_id = max(int(re.search(r"\d+$", r["达人ID"]).group()) for r in sheet["creators"]) + 1
@@ -343,14 +386,15 @@ def add_candidates(state, day, data, book=BOOK):
 def prepare_day(state, day, book=BOOK, template=TEMPLATE):
     value = day_state(state, day)
     recover_reserved(state, value, book)
-    if not value["creators"]:
-        return {"batch": None, "shortfall": DAILY_TARGET}
+    creators = value["creators"][value.get("round_start", 0):]
+    if not creators:
+        return {"batch": None, "shortfall": DAILY_TARGET-len(value["creators"])}
     exists = state.db.execute("SELECT 1 FROM batches WHERE id=?", (value["batch"],)).fetchone()
     if exists:
         result = mail.report(state, value["batch"])
     else:
-        result = mail.prepare(state, book, template, value["creators"], batch_id=value["batch"],
-                              expected_count=len(value["creators"]))
+        result = mail.prepare(state, book, template, creators, batch_id=value["batch"],
+                              expected_count=len(creators))
     value["prepared"] = True
     put(state, "day:" + day, value)
     return {**result, "preview": mail.render_preview(state, value["batch"]),
@@ -498,6 +542,9 @@ def main():
     p = sub.add_parser("start-today")
     p.add_argument("day")
     p.add_argument("input", type=Path)
+    p = sub.add_parser("start-supplement")
+    p.add_argument("day")
+    p.add_argument("input", type=Path)
     for cmd in ("approve", "record-sent"):
         p = sub.add_parser(cmd)
         p.add_argument("batch")
@@ -518,6 +565,8 @@ def main():
             result = day_state(state, args.day)
         elif args.command == "start-today":
             result = start_today(state, args.day, data, book=args.book)
+        elif args.command == "start-supplement":
+            result = start_supplement(state, args.day, data, book=args.book)
         elif args.command == "add":
             result = add_candidates(state, args.day, data, book=args.book)
         elif args.command == "prepare":
