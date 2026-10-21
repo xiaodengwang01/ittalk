@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local daily preparation and reply-summary queue. No network or sending code."""
+"""Daily preparation, local records and read-only history audit. Never sends mail."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mail_drafts as mail
 import daily_workbook as workbook
+import mail_records as records
 
 TZ = ZoneInfo("Asia/Shanghai")
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +25,7 @@ TEMPLATE = BUSINESS / "Tailki_KOL初次建联邮件_三个版本.docx"
 STRATEGY = BUSINESS / "Tailki_KOL回复策略-第二版.docx"
 REFERENCE = BUSINESS / "Tailki_KOL达人回复参考.docx"
 DAILY_TARGET = 8
+RUN_HOUR = 10
 RESEARCH_COLUMNS = {"达人ID", "达人昵称", "Email", "首联内容分类", "账号链接", "宠物类型", "内容类型",
                     "粉丝数", "近10条最高播放", "近10条中位播放", "内容能力(1-5)", "宠物人群匹配度(1-5)",
                     "播放能力(1-5)", "联系方式完整度(1-5)", "是否低粉高播放", "是否带货类似产品"}
@@ -43,6 +45,7 @@ def current_time():
 def initialize(state):
     state.db.execute("CREATE TABLE IF NOT EXISTS daily_state (key TEXT PRIMARY KEY, data TEXT NOT NULL)")
     state.db.commit()
+    records.initialize(state)
 
 
 def get(state, key, default=None):
@@ -83,7 +86,7 @@ def preflight(state, book=BOOK, template=TEMPLATE, strategy=STRATEGY, reference=
         "draft_snapshot": mail.digest(snapshot),
         "categories": list(templates),
         "requires_live_reconciliation": True,
-        "next_step": "核对表格、全部历史草稿与实际发送记录；等待链路打通、积压发完和用户明确启动。",
+        "next_step": "每日只读核对联系历史，准备名单、完整预览和未读摘要；发送须另获该版本确认。",
     }
 
 
@@ -114,7 +117,7 @@ def activate(state, evidence, **paths):
     for item in drafts_snapshot(state):
         receipt = receipts.get(item["id"], {})
         verify_receipt(item, receipt)
-    first = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    first = now.replace(hour=RUN_HOUR, minute=0, second=0, microsecond=0)
     if first <= now:
         first += timedelta(days=1)
     value = {"status": "active", "activated_at": now.isoformat(), "first_run": first.isoformat(),
@@ -123,6 +126,105 @@ def activate(state, evidence, **paths):
         raise mail.DraftError("已经启用，不能重置起始日期。")
     put(state, "activation", value)
     return value
+
+
+def configure_schedule(state, evidence, **paths):
+    """Authorize preparation at ten, independently of backlog or send approval."""
+    require_instruction(evidence)
+    if evidence.get("scope") != "prepare_only" or evidence.get("hour") != RUN_HOUR or evidence.get("timezone") != "Asia/Shanghai":
+        raise mail.DraftError("定时授权仅允许北京时间每天 10:00 的准备任务。")
+    account = state.config().get("account", "")
+    if not account or evidence.get("account", "").lower() != account.lower():
+        raise mail.DraftError("定时授权邮箱与本机配置不一致。")
+    snapshot = preflight(state, **paths)
+    if evidence.get("sources") != snapshot["sources"]:
+        raise mail.DraftError("定时授权的资料快照已变化，请重新读取。")
+    now = current_time()
+    first = now.replace(hour=RUN_HOUR, minute=0, second=0, microsecond=0)
+    if first <= now: first += timedelta(days=1)
+    previous = get(state, "activation", {})
+    if previous.get("evidence") == evidence and previous.get("scope") == "prepare_only":
+        return previous
+    value = {"status": "pending_scheduler", "scope": "prepare_only", "hour": RUN_HOUR,
+             "timezone": "Asia/Shanghai", "account": account, "first_run": first.isoformat(),
+             "activated_at": now.isoformat(), "evidence": evidence,
+             "previous": {k: v for k, v in previous.items() if k != "previous"}}
+    put(state, "activation", value)
+    return value
+
+
+def confirm_schedule(state, automation_id):
+    value = get(state, "activation", {})
+    if value.get("scope") != "prepare_only" or value.get("status") not in ("pending_scheduler", "active") or not automation_id:
+        raise mail.DraftError("先配置定时准备授权，再核实调度器启用结果。")
+    value.update(status="active", automation_id=automation_id)
+    put(state, "activation", value)
+    return value
+
+
+def audit_history(state, mailbox):
+    """Minimal headers only, including seen mail. No body backscan or flag changes."""
+    if mailbox.account.lower() != state.config().get("account", "").lower():
+        raise mail.DraftError("历史核对邮箱不一致。")
+    folders, contacts = {}, set()
+    from email.utils import getaddresses
+    for name, folder in (("INBOX", b"INBOX"), ("Sent", mailbox.sent["raw"]), ("Drafts", mailbox.drafts["raw"])):
+        validity, headers = mailbox.header_index(folder, refresh=True)
+        folders[name] = {"uidvalidity": validity, "uids": [u.decode("ascii") for u in headers]}
+        if name == "Sent":
+            for message in headers.values():
+                contacts.update(a.lower() for _, a in getaddresses(message.get_all("To", []) + message.get_all("Cc", []))
+                                if a and a.lower() != mailbox.account.lower())
+    value = {"account": mailbox.account, "checked_at": current_time().isoformat(), "folders": folders,
+             "sent_contacts": [{"email": a} for a in sorted(contacts)]}
+    put(state, "history:" + current_time().date().isoformat(), value)
+    return value
+
+
+def sync_records(state, book=BOOK):
+    """Reuse already-collected local bodies. Does not access the mailbox or change Excel."""
+    rows = workbook.read(book)["creators"]
+    collected = []
+    accounts = {}
+    from email.utils import parsedate_to_datetime
+    for audit in all_items(state, "targeted-thread-audit:"):
+        account = audit.get("account")
+        for folder, messages in audit.get("folders", {}).items():
+            for item in messages:
+                headers = item.get("headers", {})
+                message_id = headers.get("Message-ID", "")
+                if not account or not message_id: continue
+                accounts.setdefault(message_id, set()).add(account)
+                addresses = headers.get("From", "") if folder == "INBOX" else headers.get("To", "")
+                creator_id = records.creator_for({"from": addresses}, rows)
+                source = folder + ":UIDVALIDITY=" + item["uidvalidity"] + ":UID=" + item["uid"]
+                try:
+                    moment = parsedate_to_datetime(headers.get("Date", ""))
+                    stamp = moment.isoformat() if moment.tzinfo else ""
+                except (TypeError, ValueError): stamp = ""
+                collected.append(records.put(state, {"account": account, "message_id": message_id,
+                    "direction": "incoming" if folder == "INBOX" else "outgoing", "creator_id": creator_id,
+                    "source": source, "from": headers.get("From", ""), "to": headers.get("To", ""),
+                    "subject": headers.get("Subject", ""), "in_reply_to": headers.get("In-Reply-To", ""),
+                    "references": headers.get("References", ""), "received_at" if folder == "INBOX" else "sent_at": stamp,
+                    "body_status": "not_collected", "verification": "observed_headers"}))
+    for item in all_items(state, "inbox:"):
+        collected.append(records.incoming(state, item, records.creator_for(item, rows)))
+    for item in all_items(state, "reply:"):
+        message = item["message"]
+        collected.append(records.incoming(state, message, message["creator_id"]))
+    # Named historical reads were explicitly authorized at collection time.
+    for group in all_items(state, "targeted-latest-messages:"):
+        for item in group.values():
+            if isinstance(item, dict) and item.get("raw_text") and item.get("headers", {}).get("Message-ID"):
+                headers = item["headers"]
+                observed_accounts = accounts.get(headers["Message-ID"], set())
+                if len(observed_accounts) != 1: continue
+                message = {**item, "account": next(iter(observed_accounts)), "message_id": headers["Message-ID"],
+                           "from": headers.get("From", ""), "in_reply_to": headers.get("In-Reply-To", ""),
+                           "references": headers.get("References", ""), "body_status": "collected"}
+                collected.append(records.incoming(state, message, records.creator_for(message, rows)))
+    return {"records": len(set(collected)), "workbook_changed": False, "mailbox_read": False}
 
 
 def new_day(day):
@@ -175,8 +277,15 @@ def day_state(state, day):
             raise mail.DraftError("当天单次授权已失效或邮箱账号已变化。")
         return value
     activation = get(state, "activation", {})
-    if activation.get("status") != "active" or now < timestamp(activation["first_run"]) or now.hour < 9:
+    if activation.get("status") != "active" or now < timestamp(activation["first_run"]) or now.hour < activation.get("hour", RUN_HOUR):
         raise mail.DraftError("计划尚未到明确启用后的运行时间。")
+    if activation.get("scope") == "prepare_only":
+        if activation.get("account", "").lower() != state.config().get("account", "").lower():
+            raise mail.DraftError("定时授权邮箱已变化，停止准备。")
+        audit = get(state, "history:" + day, {})
+        if (audit.get("account", "").lower() != activation["account"].lower()
+                or not audit.get("checked_at") or not timedelta(0) <= now - timestamp(audit["checked_at"]) <= timedelta(hours=4)):
+            raise mail.DraftError("先运行 audit-history 完成当天邮箱联系历史核对。")
     if value is None:
         value = new_day(day)
         put(state, key, value)
@@ -206,6 +315,20 @@ def start_supplement(state, day, evidence, **paths):
     if not items or {item["creator_id"] for item in items} != set(prior_ids):
         raise mail.DraftError("当前批次与当天名单不一致，先核对历史。")
     for item in items:
+        if item.get("smtp_attempt"):
+            # SMTP final versions may differ from the initial template. Validate
+            # their own approved MIME receipt rather than the legacy draft hash.
+            import mail_send
+            result = mail_send.attempt(state, item["id"])
+            if not result or result["status"] != "sent_verified" or result.get("receipt") != item.get("sent_receipt"):
+                raise mail.DraftError("上一批 SMTP 发送仍未核实，不能建立补充批次。")
+            review = mail_send.get_review(state, result["review_id"])
+            entries = [e for e in review["entries"] if e["draft_id"] == item["id"]]
+            if (len(entries) != 1 or mail_send.review_hash(review) != review["hash"]
+                    or review.get("approval", {}).get("review_hash") != review["hash"]
+                    or result["receipt"].get("mime_hash") != entries[0]["sent_hash"]):
+                raise mail.DraftError("上一批 SMTP 回执与最终确认版不一致。")
+            continue
         receipt = get(state, "receipt:" + item["id"])
         if item["status"] != "sent_verified" or not isinstance(receipt, dict) or receipt != item.get("sent_receipt"):
             raise mail.DraftError("上一批次仍有未核实发送，不能重置名单或确认。")
@@ -350,6 +473,7 @@ def add_candidates(state, day, data, book=BOOK):
     # Activation audit includes contacts already sent to but absent from this workbook.
     history = value.get("supplement_authorization", value.get("manual_authorization",
                         get(state, "activation", {}).get("evidence", {}))).get("sent_contacts", [])
+    history = history + get(state, "history:" + day, {}).get("sent_contacts", [])
     emails.update(x["email"].lower() for x in history if x.get("email"))
     accounts.update(profile(x["profile"]) for x in history if x.get("profile"))
     next_id = max(int(re.search(r"\d+$", r["达人ID"]).group()) for r in sheet["creators"]) + 1
@@ -426,6 +550,7 @@ def summarize_replies(state, messages):
         if previous:
             value["history"].append({k: previous[k] for k in ("message", "status", "updated_at")})
         put(state, key, value)
+        records.incoming(state, message, message["creator_id"])
         changed.append(message["message_id"])
     return {"new_or_changed": changed, "pending": pending_replies(state)}
 
@@ -531,8 +656,12 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     sub.add_parser("preflight")
-    for cmd in ("activate", "summarize"):
+    for cmd in ("activate", "summarize", "configure-schedule"):
         sub.add_parser(cmd).add_argument("input", type=Path)
+    sub.add_parser("confirm-schedule").add_argument("automation_id")
+    sub.add_parser("audit-history")
+    sub.add_parser("sync-records")
+    sub.add_parser("context").add_argument("creator_id")
     for cmd in ("begin", "prepare"):
         sub.add_parser(cmd).add_argument("day")
     sub.add_parser("claim-send").add_argument("batch")
@@ -561,6 +690,20 @@ def main():
             result = preflight(state, book=args.book)
         elif args.command == "activate":
             result = activate(state, data, book=args.book)
+        elif args.command == "configure-schedule":
+            result = configure_schedule(state, data, book=args.book)
+        elif args.command == "confirm-schedule":
+            result = confirm_schedule(state, args.automation_id)
+        elif args.command == "audit-history":
+            mailbox = mail.connect(state.config())
+            try:
+                result = audit_history(state, mailbox)
+            finally:
+                mailbox.close()
+        elif args.command == "sync-records":
+            result = sync_records(state, book=args.book)
+        elif args.command == "context":
+            result = records.context(state, args.creator_id)
         elif args.command == "begin":
             result = day_state(state, args.day)
         elif args.command == "start-today":

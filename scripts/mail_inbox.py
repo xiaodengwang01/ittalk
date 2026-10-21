@@ -19,6 +19,7 @@ else:
     import daily_workflow as daily
 
 mail = daily.mail
+import mail_records as ledger
 
 
 def unread_flags(mailbox, uid):
@@ -59,10 +60,13 @@ def collect_unread(state, mailbox):
                       "uid": uid.decode("ascii"), "source": source,
                       "message_id": str(message.get("Message-ID", "")).strip() or source,
                       "from": str(message.get("From", "")), "to": str(message.get("To", "")),
+                      "in_reply_to": str(message.get("In-Reply-To", "")),
+                      "references": str(message.get("References", "")),
                       "received_at": received_at, "subject": str(message.get("Subject", "")),
                       "raw_text": mail.snapshot(raw)["body"], "raw_hash": mail.digest(raw),
                       "collected_at": mail.now(), "unread_when_collected": True}
             daily.put(state, key, record)
+        ledger.incoming(state, record)
         records.append(record)
     after = mailbox.search("UNSEEN")
     return {"account": mailbox.account, "checked_at": mail.now(), "scope": "INBOX UNSEEN",

@@ -28,6 +28,7 @@ else:
 
 SMTP_HOST = "smtp.qiye.aliyun.com"
 SMTP_PORT = 465
+DEFAULT_BOOK = Path(__file__).resolve().parent.parent / "KOL搜集与邮件回复/达人跟进表.xlsx"
 ADDRESS_HEADERS = ("From", "To", "Cc", "Bcc", "Reply-To")
 DROP_HEADERS = ("Date", "Message-ID", "Bcc", "Return-Path", "Received", "Authentication-Results",
                 "DKIM-Signature", "DomainKey-Signature", "X-Tailki-Draft-ID", "X-Tailki-Batch-ID",
@@ -325,7 +326,7 @@ def approve(state, identifier, instruction):
         raise mail.DraftError("确认必须明确对应本批完整预览及全部邮件。")
     if mail.digest(Path(review["preview"]).read_bytes()) != review["preview_hash"]:
         raise mail.DraftError("预览文件已变化，请重新读取并展示最终版本。")
-    review.update(status="approved", approval={**instruction, "recorded_at": mail.now()})
+    review.update(status="approved", approval={**instruction, "recorded_at": mail.now()}, postprocess_policy=1)
     put_review(state, review)
     return summary(review)
 
@@ -587,8 +588,10 @@ def reconcile_delivery(state, identifier, mailbox):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, default=mail.DEFAULT_STATE)
+    parser.add_argument("--book", type=Path, default=DEFAULT_BOOK)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check-smtp")
+    sub.add_parser("finalize-pending")
     p = sub.add_parser("review")
     p.add_argument("--batches", required=True)
     p.add_argument("--expect-count", type=int, required=True)
@@ -596,7 +599,7 @@ def main():
     p = sub.add_parser("approve")
     p.add_argument("review")
     p.add_argument("instruction", type=Path)
-    for command in ("send", "resume", "reconcile", "status"):
+    for command in ("send", "resume", "reconcile", "status", "finalize"):
         sub.add_parser(command).add_argument("review")
     args = parser.parse_args()
     state, mailbox, smtp = mail.State(args.state), None, None
@@ -611,13 +614,19 @@ def main():
             result = delivery_report(state, args.review)
         else:
             mailbox = mail.connect(state.config())
-            if args.command == "review":
+            if args.command == "finalize-pending":
+                result = finalize_pending(state, mailbox, args.book)
+            elif args.command == "review":
                 result = prepare_review(state, mailbox, args.batches.split(','), args.output, expected_count=args.expect_count)
             elif args.command in ("send", "resume"):
                 result = deliver(state, args.review, mailbox, resume=args.command == "resume",
                                  progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True))
+                result["postprocess"] = finalize(state, args.review, mailbox, args.book)
+            elif args.command == "finalize":
+                result = finalize(state, args.review, mailbox, args.book)
             else:
                 result = reconcile_delivery(state, args.review, mailbox)
+                result["postprocess"] = finalize(state, args.review, mailbox, args.book)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         if smtp:
@@ -625,6 +634,26 @@ def main():
         if mailbox:
             mailbox.close()
         state.close()
+
+
+def finalize(state, identifier, mailbox, book=DEFAULT_BOOK):
+    import mail_postprocess
+    result = mail_postprocess.finalize(state, sys.modules[__name__], identifier, mailbox, book)
+    review = get_review(state, identifier)
+    review["postprocess"] = {**result, "checked_at": mail.now(), "book": str(Path(book).resolve())}
+    put_review(state, review)
+    return result
+
+
+def finalize_pending(state, mailbox, book=DEFAULT_BOOK):
+    """Resume postprocessing for newly approved batches, never old unadopted batches."""
+    reviews = [json.loads(r[0]) for r in state.db.execute("SELECT data FROM send_reviews")]
+    pending = [r for r in reviews if r.get("postprocess_policy") == 1 and r["account"] == mailbox.account
+               and not r.get("postprocess", {}).get("complete")
+               and any(attempt(state, e["draft_id"]) and attempt(state, e["draft_id"])["status"] == "sent_verified"
+                       for e in r["entries"])]
+    return {"sent_by_this_command": False,
+            "reviews": [finalize(state, r["id"], mailbox, book) for r in pending]}
 
 
 if __name__ == "__main__":

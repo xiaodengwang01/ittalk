@@ -21,7 +21,7 @@ HEADERS = ["达人ID", "达人昵称", "联系状态", "沟通摘要", "Email", 
            "应对策略下拉选项", "账号链接", "平台", "宠物类型", "内容类型", "粉丝数",
            "近10条最高播放", "近10条中位播放", "内容能力(1-5)", "宠物人群匹配度(1-5)",
            "播放能力(1-5)", "联系方式完整度(1-5)", "综合评分", "是否低粉高播放", "是否带货类似产品"]
-NOW = datetime.fromisoformat("2026-10-22T09:10:00+08:00")
+NOW = datetime.fromisoformat("2026-10-22T10:10:00+08:00")
 
 
 def candidate(n=2):
@@ -95,7 +95,7 @@ class DailyTests(unittest.TestCase):
         self.temp.cleanup()
 
     def active(self):
-        d.put(self.state, "activation", {"status": "active", "first_run": "2026-10-22T09:00:00+08:00",
+        d.put(self.state, "activation", {"status": "active", "first_run": "2026-10-22T10:00:00+08:00",
                                       "evidence": {"sent_contacts": []}})
 
     def add(self, creators=None):
@@ -115,7 +115,7 @@ class DailyTests(unittest.TestCase):
                 d.day_state(self.state, "2026-10-22")
         self.assertEqual(before, self.book.read_bytes())
 
-    def test_activation_requires_all_conditions_and_next_nine(self):
+    def test_legacy_activation_requires_all_conditions_and_next_ten(self):
         paths = dict(book=self.book, template=self.template, strategy=self.template, reference=self.template)
         evidence = {**d.preflight(self.state, **paths), "pipeline_ready": True, "backlog_cleared": True,
                     "pipeline": "模拟发送链路", "account": "team@example.invalid", "unresolved": [],
@@ -128,7 +128,78 @@ class DailyTests(unittest.TestCase):
         with self.assertRaises(d.mail.DraftError):
             d.activate(self.state, {**evidence, "sources": {}}, **paths)
         result = d.activate(self.state, evidence, **paths)
-        self.assertEqual(result["first_run"], "2026-10-23T09:00:00+08:00")
+        self.assertEqual(result["first_run"], "2026-10-23T10:00:00+08:00")
+
+    def test_prepare_schedule_at_ten_requires_daily_audit_not_backlog_or_send_approval(self):
+        evidence, paths = self.manual_evidence()
+        evidence.update(hour=10, timezone='Asia/Shanghai')
+        value = d.configure_schedule(self.state, evidence, **paths)
+        self.assertEqual(value['status'], 'pending_scheduler')
+        self.assertEqual(value['first_run'], '2026-10-23T10:00:00+08:00')
+        self.assertEqual(d.configure_schedule(self.state, evidence, **paths), value)
+        d.confirm_schedule(self.state, 'simulated-automation')
+        with self.assertRaises(d.mail.DraftError): d.day_state(self.state, '2026-10-22')
+        tomorrow = NOW.replace(day=23, hour=10, minute=0)
+        with patch.object(d, 'current_time', return_value=tomorrow):
+            with self.assertRaises(d.mail.DraftError): d.day_state(self.state, '2026-10-23')
+            d.put(self.state, 'history:2026-10-23', {'account': 'team@example.invalid', 'checked_at': tomorrow.isoformat(),
+                  'sent_contacts': [{'email': 'sim2@example.invalid'}]})
+            value = d.day_state(self.state, '2026-10-23')
+            self.assertEqual(value['creators'], [])
+            self.assertIsNone(d.get(self.state, 'approval:' + value['batch']))
+            with patch.object(d, 'current_time', return_value=tomorrow.replace(hour=9, minute=59)):
+                with self.assertRaises(d.mail.DraftError): d.day_state(self.state, '2026-10-23')
+        self.assertEqual(self.state.db.execute('SELECT count(*) FROM drafts').fetchone()[0], 0)
+
+    def test_schedule_account_change_and_wider_scope_are_rejected(self):
+        evidence, paths = self.manual_evidence()
+        evidence.update(hour=10, timezone='Asia/Shanghai')
+        for change in ({'scope': 'send'}, {'hour': 9}, {'account': 'other@example.invalid'}, {'sources': {}}):
+            with self.assertRaises(d.mail.DraftError): d.configure_schedule(self.state, {**evidence, **change}, **paths)
+
+    def test_supplement_uses_smtp_final_mime_receipt_even_when_web_text_changed(self):
+        import mail_send
+        self.active()
+        self.add()
+        prepared = d.prepare_day(self.state, '2026-10-22', self.book, self.template)
+        item = self.state.items(prepared['batch'])[0]
+        mail_send.initialize(self.state)
+        review = {'id': 'sim-final-review', 'account': 'team@example.invalid', 'batches': [prepared['batch']],
+                  'entries': [{'draft_id': item['id'], 'sent_hash': 'sim-final-mime'}]}
+        review['hash'] = mail_send.review_hash(review)
+        review['approval'] = {'review_hash': review['hash']}
+        mail_send.put_review(self.state, review)
+        receipt = {'mime_hash': 'sim-final-mime', 'content_hash': 'edited-in-web-not-original-template'}
+        result = {'status': 'sent_verified', 'review_id': review['id'], 'receipt': receipt}
+        with self.state.db:
+            self.state.db.execute('INSERT INTO send_attempts VALUES (?,?,?)',
+                                  (item['id'], review['id'], json.dumps(result)))
+        self.state.update(item, status='sent_verified', smtp_attempt='sim-send', sent_receipt=receipt)
+        evidence, paths = self.manual_evidence()
+        value = d.start_supplement(self.state, '2026-10-22', evidence, **paths)
+        self.assertTrue(value['batch'].endswith('-part2'))
+        self.assertEqual(value['creators'], [item['creator_id']])
+
+    def test_history_audit_reads_only_headers_and_includes_table_external_contacts(self):
+        from scripts.test_mail_drafts import FakeIMAP
+        mailbox = d.mail.Mailbox('team@example.invalid', 'simulated-secret', factory=FakeIMAP)
+        self.state.set_config({'account': mailbox.account})
+        message = d.mail.EmailMessage()
+        message['From'] = mailbox.account
+        message['To'] = 'outside@example.invalid'
+        message['Message-ID'] = '<outside-sim@example.invalid>'
+        message.set_content('This body must not be downloaded')
+        mailbox.client.data[b'Sent'][b'1'] = message.as_bytes()
+        fetch = mailbox.fetch
+        def header_only(uid, *, headers=False):
+            self.assertTrue(headers)
+            return fetch(uid, headers=headers)
+        with patch.object(mailbox, 'fetch', side_effect=header_only):
+            result = d.audit_history(self.state, mailbox)
+        self.assertEqual(result['sent_contacts'], [{'email': 'outside@example.invalid'}])
+        self.assertEqual(set(result['folders']), {'INBOX', 'Sent', 'Drafts'})
+        self.assertNotIn('APPEND', mailbox.client.calls)
+        mailbox.close()
 
     def manual_evidence(self):
         self.state.set_config({"account": "team@example.invalid"})
@@ -180,7 +251,7 @@ class DailyTests(unittest.TestCase):
         result = d.validate_candidate(item, "2026-10-22")
         self.assertNotIn("date", result["近期视频"][0])
         for change in ({"date_text": "未知"}, {"observed_at": "2026-10-21T09:00:00+08:00"},
-                       {"observed_at": "2026-10-23T09:00:00+08:00"}):
+                       {"observed_at": "2026-10-23T10:00:00+08:00"}):
             invalid = copy.deepcopy(item)
             invalid["近期视频"][0].update(change)
             with self.subTest(change=change), self.assertRaises(d.mail.DraftError):
