@@ -96,9 +96,9 @@ SMTP 操作入口为 `python3 scripts/mail_send.py`：
 ## 检查与上传
 
 ```bash
-python3 -B -m unittest scripts.test_candidate_pool scripts.test_review_center scripts.test_daily_workflow scripts.test_mail_postprocess scripts.test_mail_send scripts.test_mail_inbox scripts.test_mail_drafts scripts.test_mail_text scripts.test_workflow_rules scripts.test_workflow_adapter -q
+"$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3" -B -m unittest scripts.test_command_launchers scripts.test_candidate_pool scripts.test_review_center scripts.test_daily_workflow scripts.test_mail_postprocess scripts.test_mail_send scripts.test_mail_inbox scripts.test_mail_drafts scripts.test_mail_text scripts.test_workflow_rules scripts.test_workflow_adapter -q
 ```
 
-检查使用模拟联系人及 `.invalid` 邮箱，不连接真实 SMTP。真实名单、邮件、凭据、预览、备份和运行记录不上传。
+检查使用带有 `python-docx` 的 Codex 内置 Python；系统自带 Python 可能缺少此依赖。检查使用模拟联系人及 `.invalid` 邮箱，不连接真实 SMTP。真实名单、邮件、凭据、预览、备份和运行记录不上传。
 
 完成程序修改和检查后运行 `python3 scripts/git_sync.py "修改说明"`，提交上传至 `https://github.com/xiaodengwang01/ittalk.git`，不强制推送。`workflow.py` 及其旧表导入/整表重写功能只供历史工具参考，不适用于当前主表。
