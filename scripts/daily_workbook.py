@@ -37,21 +37,23 @@ def read(path):
     return sheet
 
 
-def main_part(z):
+def main_part(z, sheet_name=MASTER):
+    if sheet_name not in SHEETS:
+        raise mail.DraftError("需要明确指定现有工作表。")
     book = ET.fromstring(z.read("xl/workbook.xml"))
     rels = workflow.rels(z, "xl/workbook.xml")
-    sheet = next(s for s in book.find("s:sheets", NS) if s.get("name") == MASTER)
+    sheet = next(s for s in book.find("s:sheets", NS) if s.get("name") == sheet_name)
     return workflow.resolve_part("xl/workbook.xml", rels[sheet.get("{" + NS["r"] + "}id")].get("Target"))
 
 
-def patch_cells(path, cells, *, expected_hash, backup_dir, style_row, new_rows=()):
+def patch_cells(path, cells, *, expected_hash, backup_dir, style_row, new_rows=(), sheet_name=MASTER):
     """Call under the shared state lock. Reject stale sources and unknown layouts."""
     path = Path(path)
     original = path.read_bytes()
     if mail.digest(original) != expected_hash:
         raise mail.DraftError("表格已被修改，停止覆盖；请重新读取。")
     with ZipFile(path) as z:
-        part = main_part(z)
+        part = main_part(z, sheet_name)
         raw = z.read(part).decode("utf-8")
         root = ET.fromstring(raw)
         if root.find("s:tableParts", NS) is not None or root.find("s:sheetProtection", NS) is not None:

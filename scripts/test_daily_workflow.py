@@ -98,6 +98,27 @@ class DailyTests(unittest.TestCase):
         d.put(self.state, "activation", {"status": "active", "first_run": "2026-10-22T10:00:00+08:00",
                                       "evidence": {"sent_contacts": []}})
 
+    def test_appendix_patch_preserves_main_and_unrelated_parts(self):
+        # Match the current workbook's unprefixed worksheet XML layout.
+        with ZipFile(self.book) as z:
+            parts = [(info, z.read(info.filename)) for info in z.infolist()]
+            appendix = d.workbook.main_part(z, '长期合作意愿')
+        with ZipFile(self.book, 'w') as z:
+            for info, content in parts:
+                z.writestr(info, ET.tostring(ET.fromstring(content), encoding='utf-8')
+                           if info.filename == appendix else content)
+        with ZipFile(self.book) as z:
+            original = {name: z.read(name) for name in z.namelist()}
+            target = d.workbook.main_part(z, '长期合作意愿')
+        d.workbook.patch_cells(self.book, {'B1': {'value': '模拟核对说明'}},
+            expected_hash=d.mail.digest(self.book.read_bytes()), backup_dir=self.folder / 'backups',
+            style_row=1, sheet_name='长期合作意愿')
+        with ZipFile(self.book) as z:
+            self.assertEqual(z.namelist(), list(original))
+            for name, content in original.items():
+                if name != target: self.assertEqual(z.read(name), content)
+            self.assertIn('模拟核对说明', z.read(target).decode())
+
     def add(self, creators=None):
         return d.add_candidates(self.state, "2026-10-22",
                                 {"routes_checked": ["FastMoss", "TikTok"], "creators": creators or [candidate()]},

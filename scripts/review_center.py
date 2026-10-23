@@ -192,6 +192,7 @@ def model(state, day, book=daily.BOOK):
     for identifier in sorted(set(replies) | set(notes) | set(appendix)):
         if identifier not in rows: continue
         row = rows[identifier]
+        if row.get("联系状态") == "已结束": continue
         packet = notes.get(identifier, {})
         if packet.get("inactive"): packet = {}
         summary_entry = replies.get(identifier, {})
@@ -258,6 +259,7 @@ def model(state, day, book=daily.BOOK):
             if remaining: warnings.append("一个已暂停批次还有 " + str(remaining) + " 封未提交，需核对原确认范围后继续。")
     for review in sorted(reviews, key=lambda r: r.get("reviewed_at", ""), reverse=True):
         if review.get("status") not in ("awaiting_confirmation", "approved"): continue
+        if any(rows.get(e["creator_id"], {}).get("联系状态") == "已结束" for e in review["entries"]): continue
         if any(e["draft_id"] in attempts for e in review["entries"]): continue
         if any(e["draft_id"] in represented for e in review["entries"]): continue
         valid = sender.review_hash(review) == review.get("hash")
@@ -273,6 +275,7 @@ def model(state, day, book=daily.BOOK):
                           "review_id": review["id"], "hash": review["hash"], "kind": "smtp",
                           "label": "已核对的完整稿；发送前仍须刷新邮箱版本", "read_at": review["reviewed_at"]})
     for item in daily.drafts_snapshot(state):
+        if rows.get(item["creator_id"], {}).get("联系状态") == "已结束": continue
         if item["id"] in attempts or item.get("smtp_attempt") or item["id"] in represented: continue
         if item["status"] not in ("prepared", "saved", "edited"): continue
         # Edited/remote snapshots lack full MIME and may omit attachments. Show

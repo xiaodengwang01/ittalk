@@ -199,6 +199,26 @@ class ReviewTests(unittest.TestCase):
             'sent_at': '2026-10-21T11:00:00+08:00', 'in_reply_to': '<sim-in@example.invalid>'})
         self.assertEqual(center.model(self.state, '2026-10-22', self.book)['cards'], [])
 
+    def test_closed_creator_preserves_history_without_pending_card_or_draft(self):
+        center.adopt_document(self.state, self.report('CLOSED DRAFT'), self.book)
+        rows, appendix = center.source_rows(self.book)
+        rows['SIM-000001']['联系状态'] = '已结束'
+        with patch.object(center, 'source_rows', return_value=(rows, appendix)):
+            snapshot = center.model(self.state, '2026-10-22', self.book)
+        self.assertEqual(snapshot['cards'], [])
+        self.assertTrue(center.packets(self.state)['SIM-000001']['draft'])
+        self.assertEqual(center.ledger.context(self.state, 'SIM-000001')['incoming'], 1)
+
+    def test_reply_to_previous_round_keeps_new_incoming_pending(self):
+        center.adopt_document(self.state, self.report(), self.book)
+        center.ledger.put(self.state, {'account': 'team@example.invalid', 'message_id': '<sim-out@example.invalid>',
+            'direction': 'outgoing', 'source': 'Sent:1', 'creator_id': 'SIM-000001',
+            'sent_at': '2026-10-21T11:00:00+08:00', 'in_reply_to': '<sim-in@example.invalid>'})
+        self.incoming('<sim-next@example.invalid>', 'New production question', '2026-10-21T11:08:00+08:00')
+        cards = center.model(self.state, '2026-10-22', self.book)['cards']
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]['message_id'], '<sim-next@example.invalid>')
+
     def test_changed_or_missing_image_blocks_complete_preview(self):
         center.adopt_document(self.state, self.report(image=True), self.book)
         packet = center.packets(self.state)['SIM-000001']
