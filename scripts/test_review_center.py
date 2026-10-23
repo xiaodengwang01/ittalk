@@ -105,6 +105,33 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(document,Path(second['document']).read_bytes())
         self.assertIn('@sim_pool',Path(second['page']).read_text())
 
+    def test_failed_research_routes_are_visible_without_freezing_the_day(self):
+        center.daily.put(self.state, 'day:2026-10-22', {'creators': [], 'prepared': False})
+        center.daily.put(self.state, 'pool-routes:2026-10-22', {
+            'routes': [], 'limitations': ['模拟来源读取超时，未取得当天视频证据。']})
+        result = self.build()
+        text = '\n'.join(p.text for p in Document(result['document']).paragraphs)
+        for content in (text, Path(result['page']).read_text()):
+            self.assertIn('模拟来源读取超时', content)
+            self.assertIn('仍缺 5 位', content)
+            self.assertIn('搜集尚未完成', content)
+        self.assertFalse(center.daily.get(self.state, 'day:2026-10-22')['prepared'])
+        self.assertEqual(result['counts']['added'], 0)
+
+    def test_latest_pending_summary_takes_precedence_over_old_workbook_text(self):
+        rows, appendix = center.source_rows(self.book)
+        rows['SIM-000001']['沟通摘要'] = '旧表格摘要'
+        rows['SIM-000001']['建议回复策略'] = '旧策略'
+        center.daily.put(self.state, 'reply:sim-current', {'message': {
+            'creator_id': 'SIM-000001', 'message_id': '<sim-in@example.invalid>',
+            'received_at': '2026-10-21T10:00:00+08:00', 'summary': '最新反报价摘要',
+            'reason': '最新推进方向', 'decisions': ['最新待决事项']}})
+        with patch.object(center, 'source_rows', return_value=(rows, appendix)):
+            card = center.model(self.state, '2026-10-22', self.book)['cards'][0]
+        self.assertEqual(card['summary'], '最新反报价摘要')
+        self.assertEqual(card['strategy'], '最新推进方向')
+        self.assertEqual(card['decisions'], ['最新待决事项'])
+
     def test_generated_doc_manual_changes_are_adopted_before_refresh(self):
         center.adopt_document(self.state, self.report(), self.book)
         one = self.build()

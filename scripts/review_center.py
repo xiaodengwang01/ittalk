@@ -182,6 +182,13 @@ def model(state, day, book=daily.BOOK):
     day_state = daily.get(state, "day:" + day, {})
     added = [rows[x] for x in day_state.get("creators", []) if x in rows]
     cards, warnings = [], []
+    route_check = daily.get(state, "pool-routes:" + day, {})
+    limitations = route_check.get("limitations", [])
+    if isinstance(limitations, list):
+        warnings.extend(str(item) for item in limitations if item)
+    if limitations and day_state:
+        warnings.append("今日新增 " + str(len(added)) + " 位，距每日最多 " + str(daily.DAILY_TARGET)
+                        + " 位仍缺 " + str(max(0, daily.DAILY_TARGET-len(added))) + " 位；搜集尚未完成。")
     for identifier in sorted(set(replies) | set(notes) | set(appendix)):
         if identifier not in rows: continue
         row = rows[identifier]
@@ -204,8 +211,8 @@ def model(state, day, book=daily.BOOK):
         if not isinstance(decisions, list): decisions = [str(decisions)]
         current_summary = row.get("沟通摘要") or message.get("summary", "")
         current_strategy = row.get("建议回复策略") or row.get("对方回复风格判断和应对策略") or message.get("reason", "")
-        if message_changed:
-            fresh = message.get("message_id") == current_basis["message_id"]
+        fresh = bool(message.get("message_id")) and message.get("message_id") == current_basis["message_id"]
+        if message_changed or fresh:
             current_summary = message.get("summary", "") if fresh else "新来信或记录已变化，待补齐本轮摘要。"
             current_strategy = message.get("reason", "") if fresh else "待核实最新内容后判断。"
             decisions = message.get("decisions", []) if fresh else ["请先核实本轮来信及合作条件变化。"]
