@@ -37,7 +37,8 @@ for (const [address, spec] of Object.entries(cells)) {
 book.recalculate();
 for (const [address, spec] of Object.entries(cells)) {
   const range = sheet.getRange(address);
-  if (spec.formula && typeof range.values[0][0] !== 'number')
-    throw Error(`新增公式未得到数值：${address}`);
+  // Unscored research rows intentionally display an empty aggregate score.
+  if (spec.formula && typeof range.values[0][0] !== 'number' && range.values[0][0] !== '')
+    throw Error(`新增公式未得到数值或空值：${address}`);
 }
 await (await SpreadsheetFile.exportXlsx(book)).save(output);
