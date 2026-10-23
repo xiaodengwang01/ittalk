@@ -191,6 +191,9 @@ def select_day(state, day, mailbox, book=daily.BOOK, template=daily.TEMPLATE):
     chosen = []
     for item in candidates:
         if len(chosen) >= remaining: break
+        planned = item.get("planned_day") or item["data"].get("计划批次日期", "")
+        if planned and planned > day:
+            continue
         if item["profile"] in profiles or set(item["aliases"]) & contacted:
             item.update(status="excluded_contacted", ever_contacted=True, reason="入选前发现已有账号或本机联系记录。")
             store(state, item); continue
@@ -241,9 +244,10 @@ def summary(state, day=None):
         result.append({"id": item["id"], "profile": item["profile"], "name": item["data"].get("达人昵称") or "@" + item["profile"].rsplit("@", 1)[-1],
                        "email": item["email"], "status": status, "label": LABELS[status], "reason": item.get("reason", ""),
                        "checked_at": item["data"].get("核实时间") or item["data"].get("历史筛查日期", ""), "creator_id": item.get("creator_id", ""),
+                       "planned_day": item.get("planned_day") or item["data"].get("计划批次日期", ""),
                        "selected_day": item.get("selected_day", "")})
     return {"limit": daily.DAILY_TARGET, "total": len(result), "counts": dict(Counter(x["status"] for x in result)),
-            "available_today": sum(x["status"] == "available" for x in result), "items": result}
+            "available_today": sum(x["status"] == "available" and (not x["planned_day"] or x["planned_day"] <= day) for x in result), "items": result}
 
 
 def mark_sent(state, creator_id, event):

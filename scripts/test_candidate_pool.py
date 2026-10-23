@@ -117,6 +117,28 @@ class PoolTests(unittest.TestCase):
         self.ingest([fixtures.candidate(2)])
         self.assertEqual(len(self.select()['selection']),1)
 
+    def test_future_planned_candidate_does_not_take_an_earlier_batch_slot(self):
+        future = fixtures.candidate(2)
+        future['计划批次日期'] = '2026-10-23'
+        self.ingest([future, fixtures.candidate(3)])
+        self.assertEqual(pool.summary(self.state)['available_today'], 1)
+        result = self.select()
+        self.assertEqual(len(result['selection']), 1)
+        self.assertEqual({x['recipient'] for x in self.state.items(result['preparation']['batch'])}, {'sim3@example.invalid'})
+        held = next(x for x in pool.entries(self.state) if x['email'] == 'sim2@example.invalid')
+        self.assertEqual(held['status'], 'available')
+        self.assertNotIn('ever_contacted', held)
+
+    def test_record_level_planned_date_is_also_respected(self):
+        self.ingest([fixtures.candidate(2)])
+        item = pool.entries(self.state)[0]
+        item['planned_day'] = '2026-10-23'
+        pool.store(self.state, item)
+        self.assertEqual(pool.summary(self.state)['available_today'], 0)
+        before = self.book.read_bytes()
+        self.assertEqual(self.select()['selection'], [])
+        self.assertEqual(self.book.read_bytes(), before)
+
     def test_missing_fields_or_bad_scores_are_retained_but_not_selected(self):
         one,two=fixtures.candidate(2),fixtures.candidate(3)
         one['Email']='';two['内容能力(1-5)']='unknown'
