@@ -134,6 +134,7 @@ class ReviewTests(unittest.TestCase):
 
     def test_received_date_uses_beijing_time_in_daily_review(self):
         self.incoming(date='2026-10-21T12:03:59-07:00')
+        center.adopt_document(self.state, self.report(), self.book)
         card = center.model(self.state, '2026-10-22', self.book)['cards'][0]
         self.assertEqual(card['received_at'], '2026-10-22T03:03:59+08:00')
 
