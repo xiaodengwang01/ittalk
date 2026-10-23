@@ -217,10 +217,13 @@ def model(state, day, book=daily.BOOK):
             current_strategy = message.get("reason", "") if fresh else "待核实最新内容后判断。"
             decisions = message.get("decisions", []) if fresh else ["请先核实本轮来信及合作条件变化。"]
         if not isinstance(decisions, list): decisions = [str(decisions)]
+        received_at = latest.get("received_at", message.get("received_at", ""))
+        if received_at:
+            received_at = daily.timestamp(received_at).isoformat()
         card = {"creator_id": identifier, "name": row.get("达人昵称", identifier), "email": row.get("Email", ""),
                 "status": row.get("联系状态", ""), "summary": current_summary,
                 "strategy": current_strategy,
-                "decisions": decisions, "received_at": latest.get("received_at", message.get("received_at", "")),
+                "decisions": decisions, "received_at": received_at,
                 "incoming": context["incoming"], "outgoing": context["outgoing"], "coverage": context["coverage"],
                 "raw_text": latest.get("raw_text", ""), "message_id": current_basis["message_id"],
                 "source": latest.get("source", message.get("source", "")), "stale": stale,

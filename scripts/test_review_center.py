@@ -132,6 +132,11 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(card['strategy'], '最新推进方向')
         self.assertEqual(card['decisions'], ['最新待决事项'])
 
+    def test_received_date_uses_beijing_time_in_daily_review(self):
+        self.incoming(date='2026-10-21T12:03:59-07:00')
+        card = center.model(self.state, '2026-10-22', self.book)['cards'][0]
+        self.assertEqual(card['received_at'], '2026-10-22T03:03:59+08:00')
+
     def test_generated_doc_manual_changes_are_adopted_before_refresh(self):
         center.adopt_document(self.state, self.report(), self.book)
         one = self.build()
