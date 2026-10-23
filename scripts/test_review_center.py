@@ -219,6 +219,27 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]['message_id'], '<sim-next@example.invalid>')
 
+    def test_mentor_brief_adds_closure_recommendations_without_reopening_creator(self):
+        rows, appendix = center.source_rows(self.book)
+        rows['SIM-000001']['联系状态'] = '已结束'
+        center.daily.put(self.state, 'mentor-brief:2026-10-22', {
+            'title': '模拟带教决策汇报', 'intro': '模拟已核实的合作进展。',
+            'closure_recommendations': [{'title': '模拟达人', 'context': '模拟报价超出已讨论范围。',
+                'recommendation': '建议终止本轮合作，请带教确认。', 'handling': '已暂停跟进，未另发邮件。'}],
+            'waiting': [], 'decisions': [], 'include_operational_warnings': False})
+        with patch.object(center, 'source_rows', return_value=(rows, appendix)):
+            result = self.build()
+            self.assertEqual(center.model(self.state, '2026-10-22', self.book)['cards'], [])
+        text = '\n'.join(p.text for p in Document(result['document']).paragraphs)
+        self.assertIn('建议终止本轮合作，请带教确认。', text)
+        self.assertEqual(result['counts']['drafts'], 0)
+        first_hash = result['document_model_hash']
+        brief = center.daily.get(self.state, 'mentor-brief:2026-10-22')
+        brief['closing_note'] = '模拟新增待决事项。'
+        center.daily.put(self.state, 'mentor-brief:2026-10-22', brief)
+        with patch.object(center, 'source_rows', return_value=(rows, appendix)):
+            self.assertNotEqual(self.build()['document_model_hash'], first_hash)
+
     def test_changed_or_missing_image_blocks_complete_preview(self):
         center.adopt_document(self.state, self.report(image=True), self.book)
         packet = center.packets(self.state)['SIM-000001']

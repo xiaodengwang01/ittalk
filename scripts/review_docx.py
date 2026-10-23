@@ -37,12 +37,46 @@ def write_document(snapshot, output):
     doc.styles["Heading 2"].font.size = Pt(11.5)
     for name in ("Heading 1", "Heading 2"):
         doc.styles[name].paragraph_format.keep_with_next = True
-    doc.core_properties.title = "KOL 跟进与待决事项"
+    brief = snapshot.get("mentor_brief") or {}
+    title = brief.get("title", "KOL 跟进与待决事项")
+    doc.core_properties.title = title
     doc.core_properties.author = "Tailki"
-    doc.add_paragraph("KOL 跟进与待决事项", "Title")
+    doc.add_paragraph(title, "Title")
     paragraph = doc.add_paragraph(snapshot["date"] + "  带教审核")
     paragraph.paragraph_format.space_after = Pt(4)
-    doc.add_paragraph("带教，我整理了目前待决定的合作条件和已准备的回复稿。请您确认推进方向，邮件随后仍由我核对最终版本再发送。以下沿用已采集的沟通资料；新来信和条件变化会另行更新。")
+    doc.add_paragraph(brief.get("intro", "带教，我整理了目前待决定的合作条件和已准备的回复稿。请您确认推进方向，邮件随后仍由我核对最终版本再发送。以下沿用已采集的沟通资料；新来信和条件变化会另行更新。"))
+    if brief:
+        doc.add_heading("请带教决策", 1)
+        for item in brief.get("decisions", []):
+            doc.add_heading(item["title"], 2)
+            doc.add_paragraph(item["context"])
+            if item.get("recommendation"): doc.add_paragraph("我的建议：" + item["recommendation"])
+            for question in item.get("questions", []):
+                doc.add_paragraph("请带教确认：" + question)
+        if brief.get("closure_recommendations"):
+            paragraph = doc.add_heading("建议终止的合作", 1)
+            paragraph.paragraph_format.page_break_before = True
+            for item in brief["closure_recommendations"]:
+                doc.add_heading(item["title"], 2)
+                doc.add_paragraph(item["context"])
+                doc.add_paragraph("建议：" + item["recommendation"])
+                if item.get("handling"): doc.add_paragraph("目前处理：" + item["handling"])
+        if brief.get("waiting"):
+            paragraph = doc.add_heading("已回复，等待对方反馈", 1)
+            if not brief.get("closure_recommendations"):
+                paragraph.paragraph_format.page_break_before = True
+            for item in brief["waiting"]:
+                doc.add_heading(item["title"], 2)
+                doc.add_paragraph(item["context"])
+                if item.get("next_step"): doc.add_paragraph("下一步：" + item["next_step"])
+        if brief.get("closing_note"): doc.add_paragraph(brief["closing_note"])
+        # Keep the decision overview compact without reducing the body font.
+        for paragraph in doc.paragraphs:
+            if paragraph.style.name == "Normal":
+                paragraph.paragraph_format.space_after = Pt(3)
+            elif paragraph.style.name == "Heading 2":
+                paragraph.paragraph_format.space_before = Pt(8)
+                paragraph.paragraph_format.space_after = Pt(4)
     if snapshot["added"]:
         doc.add_heading("今日新增达人", 1)
         table = doc.add_table(rows=1, cols=3)
@@ -67,8 +101,9 @@ def write_document(snapshot, output):
         doc.add_paragraph("首联邮件的全部收件人、主题和完整正文见今日审核入口。")
     cards = snapshot["cards"]
     for index, card in enumerate(cards):
-        if index or snapshot["added"]: doc.add_page_break()
-        doc.add_heading(heading(card["title"]), 1)
+        paragraph = doc.add_heading(heading(card["title"]), 1)
+        if index or snapshot["added"] or brief:
+            paragraph.paragraph_format.page_break_before = True
         if card["draft"]:
             # Detailed context precedes the exact reusable mail body.
             for part in card["details"]:
@@ -108,7 +143,7 @@ def write_document(snapshot, output):
                 if not card["decisions"]: doc.add_paragraph("请确认下一步推进方向。")
             if card["stale"]: doc.add_paragraph("此前汇报或回复稿的依据已有变化，需先核实最新内容。")
     if not cards and not snapshot["added"]: doc.add_paragraph("目前没有已整理的新增达人或带教待决事项。")
-    if snapshot["warnings"]:
+    if snapshot["warnings"] and brief.get("include_operational_warnings", True):
         doc.add_heading("待核实事项", 1)
         for warning in snapshot["warnings"]: doc.add_paragraph(warning)
     Path(output).parent.mkdir(parents=True, exist_ok=True)

@@ -290,14 +290,16 @@ def model(state, day, book=daily.BOOK):
                       "label": "待核对邮箱最终稿" if current else "本机首联初稿，待确认", "read_at": item.get("updated_at", "")})
     generated_at = mail.now()
     import candidate_pool
+    mentor_brief = daily.get(state, "mentor-brief:" + day, {})
     result = {"date": day, "generated_at": generated_at, "book": str(Path(book).resolve()),
               "book_hash": mail.digest(Path(book).read_bytes()), "added": added, "cards": cards, "mails": mails,
               "warnings": warnings, "schedule": daily.get(state, "activation", {}),
               "candidate_pool": candidate_pool.summary(state, day), "daily_limit": daily.DAILY_TARGET,
+              "mentor_brief": mentor_brief,
               "verified_total": sum(a["status"] == "sent_verified" for a in attempts.values()),
               "sent_today": sum(a["status"] == "sent_verified" and a.get("receipt", {}).get("sent_at", "")[:10] == day for a in attempts.values())}
     result["hash"] = mail.digest({k: v for k, v in result.items() if k != "generated_at"})
-    result["document_model_hash"] = mail.digest({k: result[k] for k in ("date", "added", "cards", "warnings")})
+    result["document_model_hash"] = mail.digest({k: result[k] for k in ("date", "added", "cards", "warnings", "mentor_brief")})
     return result
 
 
