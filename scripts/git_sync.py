@@ -15,7 +15,7 @@ REMOTE = "https://github.com/xiaodengwang01/ittalk.git"
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 MOCK_WORKBOOK = Path("scripts/examples/Tailki_模拟.xlsx")
 PUBLIC_ROOT_FILES = {".gitignore", ".gitattributes", "README.md", "AGENTS.md", "一键上传.command", "首次授权并上传.command"}
-# These nine reference images were explicitly approved for publication.
+# These reference images were explicitly approved for publication.
 PUBLIC_COUNTING_IMAGES = {
     "docs/计数聚合题素材/第一批/01_双色胶囊.jpg",
     "docs/计数聚合题素材/第一批/02_彩色胶囊.png",
@@ -26,6 +26,11 @@ PUBLIC_COUNTING_IMAGES = {
     "docs/计数聚合题素材/第二批/03_彩色积木.jpg",
     "docs/计数聚合题素材/第二批/04_混合意面.webp",
     "docs/计数聚合题素材/第二批/05_彩色木夹.jpg",
+    "docs/计数聚合题素材/第三批/01_国际象棋.jpg",
+    "docs/计数聚合题素材/第三批/02_金属钥匙.jpg",
+    "docs/计数聚合题素材/第三批/03_混合坚果.jpg",
+    "docs/计数聚合题素材/第三批/04_贝壳与海星.jpg",
+    "docs/计数聚合题素材/第三批/05_五金零件.jpg",
 }
 
 
