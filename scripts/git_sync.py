@@ -15,6 +15,18 @@ REMOTE = "https://github.com/xiaodengwang01/ittalk.git"
 NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 MOCK_WORKBOOK = Path("scripts/examples/Tailki_模拟.xlsx")
 PUBLIC_ROOT_FILES = {".gitignore", ".gitattributes", "README.md", "AGENTS.md", "一键上传.command", "首次授权并上传.command"}
+# These nine reference images were explicitly approved for publication.
+PUBLIC_COUNTING_IMAGES = {
+    "docs/计数聚合题素材/第一批/01_双色胶囊.jpg",
+    "docs/计数聚合题素材/第一批/02_彩色胶囊.png",
+    "docs/计数聚合题素材/第一批/03_彩色纽扣.jpg",
+    "docs/计数聚合题素材/第一批/04_彩色珠子.jpg",
+    "docs/计数聚合题素材/第二批/01_彩色骰子.jpg",
+    "docs/计数聚合题素材/第二批/02_多米诺骨牌.jpg",
+    "docs/计数聚合题素材/第二批/03_彩色积木.jpg",
+    "docs/计数聚合题素材/第二批/04_混合意面.webp",
+    "docs/计数聚合题素材/第二批/05_彩色木夹.jpg",
+}
 
 
 def git(*args, check=True, timeout=30):
@@ -72,6 +84,8 @@ def check_mock_workbook():
 def approved_path(name):
     path = Path(name)
     if name in PUBLIC_ROOT_FILES:
+        return True
+    if name in PUBLIC_COUNTING_IMAGES:
         return True
     if path == MOCK_WORKBOOK:
         return True
