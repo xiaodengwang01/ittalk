@@ -104,11 +104,18 @@ def write_document(snapshot, output):
         paragraph = doc.add_heading(heading(card["title"]), 1)
         if index or snapshot["added"] or brief:
             paragraph.paragraph_format.page_break_before = True
+        doc.add_paragraph("达人ID：" + card["creator_id"])
+        doc.add_heading("对方来信原文", 2)
+        doc.add_paragraph(card.get("raw_text") or "本轮来信原文尚未提供。")
+        doc.add_heading("来信要点", 2)
+        doc.add_paragraph(card.get("incoming_points") or card["summary"] or "待整理。")
+        doc.add_heading("我方回复要点及应对策略", 2)
+        doc.add_paragraph(card.get("reply_points") or card["strategy"] or "待结合来信整理。")
+        for decision in card["decisions"]: doc.add_paragraph("待确认：" + str(decision))
+        for part in card["details"]:
+            doc.add_paragraph(part["text"])
+        doc.add_heading("我方完整回复正文", 2)
         if card["draft"]:
-            # Detailed context precedes the exact reusable mail body.
-            for part in card["details"]:
-                doc.add_paragraph(heading(part["text"]) if part.get("heading") else part["text"], "Heading 2" if part.get("heading") else "Normal")
-            if not card["details"]: doc.add_paragraph(card["summary"])
             draft = card["draft"]
             doc.add_paragraph("收件人：" + draft["recipient"])
             for key, label in (("cc", "抄送："), ("bcc", "密送：")):
@@ -129,18 +136,8 @@ def write_document(snapshot, output):
             paragraph = doc.add_paragraph("审核状态：待确认，未发送。")
             for run in paragraph.runs: run.font.size = Pt(9)
         else:
-            if card["details"]:
-                for part in card["details"]:
-                    doc.add_paragraph(heading(part["text"]) if part.get("heading") else part["text"], "Heading 2" if part.get("heading") else "Normal")
-            else:
-                doc.add_paragraph("合作邮箱：" + card["email"])
-                doc.add_paragraph(card["summary"])
-                if card["received_at"]: doc.add_paragraph("最近已采集来信时间：" + card["received_at"][:10])
-                doc.add_heading("建议推进方向", 2)
-                doc.add_paragraph(card["strategy"] or "待结合最新来信判断。")
-                doc.add_heading("请您决定", 2)
-                for decision in card["decisions"]: doc.add_paragraph(str(decision))
-                if not card["decisions"]: doc.add_paragraph("请确认下一步推进方向。")
+            doc.add_paragraph("合作邮箱：" + card["email"])
+            doc.add_paragraph("本轮完整回复尚未整理。")
             if card["stale"]: doc.add_paragraph("此前汇报或回复稿的依据已有变化，需先核实最新内容。")
     if not cards and not snapshot["added"]: doc.add_paragraph("目前没有已整理的新增达人或带教待决事项。")
     if snapshot["warnings"] and brief.get("include_operational_warnings", True):

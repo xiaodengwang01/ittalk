@@ -6,11 +6,45 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 import imaplib
 import json
+import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import daily_workbook as workbook
 import mail_records as records
+
+
+def normalized_body(value):
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def sent_synopsis(state, event):
+    """Use a semantic summary only when it is bound to the actual sent body."""
+    mail = records.mail
+    if event.get("summary") and event.get("summary_body_hash") == mail.digest(event["raw_text"]):
+        return event["summary"], False
+    table = state.db.execute("SELECT name FROM sqlite_master WHERE name='review_packets'").fetchone()
+    saved = state.db.execute("SELECT data FROM review_packets WHERE creator_id=?", (event["creator_id"],)).fetchone() if table else None
+    if saved:
+        packet = json.loads(saved[0]); draft = packet.get("draft") or {}
+        body = "\n\n".join(b.get("text", "") for b in draft.get("blocks", []) if b.get("text"))
+        if (packet.get("pending_summary") and not packet.get("unresolved_comments")
+                and normalized_body(body) == normalized_body(event["raw_text"])
+                and draft.get("subject") == event.get("subject")
+                and draft.get("recipient", "").lower() == event.get("to", "").lower()):
+            return packet["pending_summary"], True
+    prefix = "首联已发送" if not event.get("in_reply_to") else "已回复"
+    return prefix + "；主题：" + event.get("subject", "") + "；内容梗概待整理。", False
+
+
+def history_line(existing, day, direction, summary):
+    line = f"{day}｜{direction}：{summary.strip()}"
+    lines = (existing or "").splitlines()
+    # Message-ID idempotence is handled by mail_actions; identical semantic
+    # messages may be separate mail, so do not deduplicate solely by wording.
+    lines.append(line)
+    return "\n".join(sorted(lines, key=lambda x: re.match(r"\d{4}-\d{2}-\d{2}", x)[0]
+                          if re.match(r"\d{4}-\d{2}-\d{2}", x) else "9999"))
 
 
 def verified_message(state, sender, review, entry, mailbox):
@@ -64,6 +98,7 @@ def write_workbook(state, sender, review, entry, event, book):
     if len(rows) != 1 or str(rows[0].get("Email", "")).strip().lower() != event["to"]:
         raise mail.DraftError("主表达人或邮箱已变更，停止写回。")
     row = rows[0]
+    sheet = next((s for s in sheet.get("sheets", []) if s["name"] == row.get("_sheet")), sheet)
     def empty(value): return value in (None, "")
     if not progress.get("fields"):
         changes = {}
@@ -72,17 +107,26 @@ def write_workbook(state, sender, review, entry, event, book):
                 raise mail.DraftError("主表表头缺失或重复：" + header)
             changes[header] = {"before": row.get(header, ""), "after": value, "date": date}
         day = datetime.fromisoformat(event["sent_at"]).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        simple = "往来邮件梗概" in sheet["headers"]
+        state_header = "当前建联状况" if simple else "联系状态"
         if not event["in_reply_to"]:
             prior = row.get("初次建联日期", "")
             if not empty(prior) and str(prior)[:10] != day:
                 raise mail.DraftError("主表首联日期与实际发送日期冲突，保留人工记录。")
             if empty(prior): change("初次建联日期", day, date=True)
-            if row.get("联系状态") == "待首联确认":
-                change("联系状态", "初次建联未回复")
-        elif all(empty(row.get(h)) for h in ("我方第一次回复邮件日期", "我们的第一次回复邮件原始文本", "我们的第一次回复邮件摘要")):
+            if row.get(state_header) == "待首联确认":
+                change(state_header, "初次建联未回复")
+        elif not simple and all(empty(row.get(h)) for h in ("我方第一次回复邮件日期", "我们的第一次回复邮件原始文本", "我们的第一次回复邮件摘要")):
             change("我方第一次回复邮件日期", day, date=True)
             change("我们的第一次回复邮件原始文本", event["raw_text"])
             # No invented semantic summary; retain later rounds in the message ledger.
+        if simple:
+            summary, matched = sent_synopsis(state, event)
+            change("往来邮件梗概", history_line(row.get("往来邮件梗概"), day, "我方", summary))
+            if matched and row.get("待发送回复梗概") == "未发送｜" + summary:
+                change("待发送回复梗概", "")
+                change("沟通摘要", day + " 我方已回复：" + summary)
+                if row.get(state_header) != "已结束": change(state_header, "我方已回复")
         note = str(row.get("备注", "") or "")
         marker = "每日批次：" + entry["batch_id"] + "\n首联未发送；"
         if not event["in_reply_to"] and note.startswith(marker):
@@ -105,12 +149,13 @@ def write_workbook(state, sender, review, entry, event, book):
         cells[address] = {"value": spec["after"], "date": spec["date"]}
     if cells:
         workbook.patch_cells(book, cells, expected_hash=original_hash,
-                             backup_dir=state.path.parent / "backups", style_row=row["_row"])
+                             backup_dir=state.path.parent / "backups", style_row=row["_row"],
+                             sheet_name=row.get("_sheet", workbook.MASTER))
     # Verify after replacement before recording completion or touching any draft.
     saved = next(r for r in workbook.read(book)["creators"] if r["达人ID"] == entry["creator_id"])
     for header, spec in progress["fields"].items():
         value = saved.get(header, "")
-        if not (value == spec["after"] or (spec["date"] and str(value)[:10] == spec["after"])):
+        if not (value == spec["after"] or (empty(value) and empty(spec["after"])) or (spec["date"] and str(value)[:10] == spec["after"])):
             raise mail.DraftError("写回读验不一致，停止草稿清理。")
     return records.action(state, key, status="done", workbook_hash=mail.digest(book.read_bytes()))
 

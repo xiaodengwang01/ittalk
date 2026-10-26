@@ -438,7 +438,7 @@ def recover_reserved(state, value, book):
             missing.append(candidate)
     if missing:
         last = max(r["_row"] for r in sheet["rows"])
-        style_row = max(r["_row"] for r in sheet["creators"])
+        style_row = max((r["_row"] for r in sheet["main_creators"]), default=2)
         cells, new_rows = {}, []
         for offset, candidate in enumerate(missing, 1):
             number = last + offset
@@ -448,10 +448,12 @@ def recover_reserved(state, value, book):
                       "备注": "每日批次：" + value["batch"] + "\n首联未发送；" +
                       json.dumps({k: v for k, v in candidate.items() if k not in sheet["headers"]},
                                  ensure_ascii=False)}
+            record.update(当前建联状况="待首联确认", WhatsApp联系方式="未提供", 可沟通时间="未提供",
+                          收件信息="姓名：未提供\n电话：未提供\n地址及邮编：未提供", 历史批次=value["date"])
             for i, header in enumerate(sheet["headers"], 1):
                 if header == "综合评分":
                     cells[f"{workbook.workflow.col_name(i)}{number}"] = {
-                        "formula": f'=IF(COUNTA(AQ{number}:AT{number})=0,"",AVERAGE(AQ{number}:AT{number}))'}
+                        "formula": workbook.score_formula(sheet["headers"], number)}
                 elif header and record.get(header) not in ("", None):
                     cells[f"{workbook.workflow.col_name(i)}{number}"] = {"value": record[header]}
         workbook.patch_cells(book, cells, expected_hash=book_hash,
@@ -613,7 +615,7 @@ def record_sent(state, batch, receipts, book=BOOK):
     book_hash = mail.digest(Path(book).read_bytes())
     sheet = workbook.read(book)
     rows = {r["达人ID"]: r for r in sheet["creators"]}
-    cells, accepted = {}, []
+    cells_by_sheet, accepted = {}, []
     for identifier, receipt in receipts.items():
         item = items[identifier]
         if approval["content_hashes"].get(identifier) != item["content_hash"]:
@@ -625,26 +627,40 @@ def record_sent(state, batch, receipts, book=BOOK):
         if previous and previous != receipt:
             raise mail.DraftError("已有不同发送记录，不能覆盖或重复发送。")
         row = rows[item["creator_id"]]
+        target = next(s for s in sheet["sheets"] if s["name"] == row["_sheet"])
+        cells = cells_by_sheet.setdefault(row["_sheet"], {})
+        def set_field(header, value, **options):
+            cells[workbook.address(target["headers"], header, row["_row"])] = {"value": value, **options}
         if str(row.get("Email", "")).lower() != item["recipient"].lower():
             raise mail.DraftError("主表邮箱已变更，停止写回。")
         day = timestamp(receipt["sent_at"]).date().isoformat()
         if row.get("初次建联日期") and str(row["初次建联日期"])[:10] != day:
             raise mail.DraftError("主表已有不同日期，保留人工记录。")
         if not row.get("初次建联日期"):
-            cells[f"G{row['_row']}"] = {"value": day, "date": True}
+            set_field("初次建联日期", day, date=True)
         if row.get("联系状态") == "待首联确认":
-            cells[f"C{row['_row']}"] = {"value": "初次建联未回复"}
+            set_field("当前建联状况" if "当前建联状况" in target["headers"] else "联系状态", "初次建联未回复")
         # Replace only our own preparation marker, preserving all source notes
         # and any human edits around it.
         pending_note = "每日批次：" + batch + "\n首联未发送；"
         note = row.get("备注", "")
         if isinstance(note, str) and note.startswith(pending_note):
-            cells[f"O{row['_row']}"] = {"value": "每日批次：" + batch +
-                                      "\n首联已发送（" + day + "）；" + note[len(pending_note):]}
+            set_field("备注", "每日批次：" + batch + "\n首联已发送（" + day + "）；" + note[len(pending_note):])
+        receipt_marker = "已核验发送：" + receipt["message_id"]
+        if "往来邮件梗概" in target["headers"] and not previous and receipt_marker not in str(note):
+            from mail_postprocess import history_line
+            set_field("往来邮件梗概", history_line(row.get("往来邮件梗概"), day, "我方",
+                      "首联已发送；主题：" + item["subject"] + "。"))
+            note_address = workbook.address(target["headers"], "备注", row["_row"])
+            new_note = cells.get(note_address, {}).get("value", note or "")
+            set_field("备注", new_note.rstrip() + "\n" + receipt_marker + "；" + receipt["sent_at"])
         accepted.append((item, receipt))
-    if cells:
-        workbook.patch_cells(book, cells, expected_hash=book_hash,
-                             backup_dir=state.path.parent / "backups", style_row=sheet["creators"][-1]["_row"])
+    for name, cells in cells_by_sheet.items():
+        if not cells: continue
+        row_number = int(re.search(r"\d+$", next(iter(cells)))[0])
+        workbook.patch_cells(book, cells, expected_hash=book_hash, sheet_name=name,
+                             backup_dir=state.path.parent / "backups", style_row=row_number)
+        book_hash = mail.digest(Path(book).read_bytes())
     for item, receipt in accepted:
         put(state, "receipt:" + item["id"], receipt)
         mail.State.update(state, item, status="sent_verified", sent_receipt=receipt)
