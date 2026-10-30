@@ -1,6 +1,0 @@
-* text=auto
-*.md text eol=lf
-*.py text eol=lf
-*.mjs text eol=lf
-*.command text eol=lf
-*.xlsx binary
