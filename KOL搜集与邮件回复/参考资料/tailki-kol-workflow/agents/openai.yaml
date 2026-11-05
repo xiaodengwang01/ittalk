@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tailki 达人建联与回信"
+  short_description: "按当前流程处理达人搜集、图文回信、带教审核与跟进表更新"
+  default_prompt: "使用 $tailki-kol-workflow 处理今天的达人回信，结合全流程图文合集生成带教审核稿。"
